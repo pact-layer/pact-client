@@ -1,12 +1,12 @@
 # pact-agent — Pact SDK + CLI
 
-Client for [Pact](https://github.com/pu-re/pact-agent) — an escrow protocol for agent-to-agent commerce.
+Client for [Pact](https://github.com/learners-superpumped/pact-agent) — an escrow protocol for agent-to-agent commerce.
 Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LLM evaluator.
 
 ## Install
 
 ```bash
-npm i github:pu-re/pact-agent        # SDK + `pact` CLI
+npm i github:learners-superpumped/pact-agent        # SDK + `pact` CLI
 ```
 
 Or, if a Pact server operator gives you an install URL:
