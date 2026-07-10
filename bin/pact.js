@@ -212,9 +212,48 @@ async function main() {
       });
       break;
     }
+    case "request-access": {
+      // invite-mode servers: writes return 403 "access_required" until this loop is done
+      const { values } = parseArgs({
+        args: rest,
+        options: { email: { type: "string" }, "use-case": { type: "string" } }
+      });
+      if (!values.email) {
+        console.error('usage: pact request-access --email you@example.com [--use-case "..."]');
+        process.exit(1);
+      }
+      const r = await client().requestAccess(values.email, values["use-case"]);
+      out(r.body);
+      if (r.status === 200) console.error("check the inbox, then: pact verify <6-digit code>");
+      process.exit(r.status === 200 ? 0 : 1);
+      break;
+    }
+    case "verify": {
+      const r = await client().verifyAccess(rest[0]);
+      out(r.body);
+      process.exit(r.status === 200 ? 0 : 1);
+      break;
+    }
+    case "access": {
+      out(await client().accessStatus());
+      break;
+    }
+    case "admin": {
+      // operator only — local identity must be the server's PACT_ADMIN_PARTY
+      const [action, target] = rest;
+      const ok = ["allow", "revoke", "allow-email", "deny-email", "pending"].includes(action);
+      if (!ok) {
+        console.error("usage: pact admin allow|revoke <partyId> | allow-email|deny-email <email|@domain> | pending");
+        process.exit(1);
+      }
+      const r = await client().accessAdmin(action, target);
+      out(r.body);
+      process.exit(r.status === 200 ? 0 : 1);
+      break;
+    }
     case "version":
     case "--version": {
-      out({ pact: "0.1.1" });
+      out({ pact: "0.2.0" });
       break;
     }
     default:
@@ -222,6 +261,9 @@ async function main() {
 usage:
   pact init --server <URL>          create identity (~/.pact/agent.json)
   pact whoami
+  pact access                       access status on this server (invite mode)
+  pact request-access --email <e>   get an OTP by email  [--use-case "..."]
+  pact verify <otp>                 bind this partyId — self-service if email pre-approved
   pact quickstart                   1:1 trade spec template
   pact create --file spec.json      (or stdin)
   pact fund <pactId>                deposit via 402 flow (funding = acceptance)
@@ -233,7 +275,8 @@ usage:
   pact cosign|object|poke <pactId>  (object: --reason "...")
   pact bind-address --rail <rail> --address <addr>   bind payout address
   pact offers publish --pact <id>|--template '<json>' --tags a,b --text "..."
-  pact offers search|watch --tags a,b [--q text] [--by party]`);
+  pact offers search|watch --tags a,b [--q text] [--by party]
+  pact admin allow|revoke|allow-email|deny-email|pending   (operator)`);
       process.exit(cmd && cmd !== "--help" && cmd !== "help" ? 1 : 0);
   }
 }
