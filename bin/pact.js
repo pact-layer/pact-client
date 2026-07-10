@@ -42,7 +42,7 @@ async function main() {
     case "init": {
       const { values } = parseArgs({ args: rest, options: { server: { type: "string" }, force: { type: "boolean" } } });
       if (existsSync(CONF) && !values.force) {
-        console.error(`agent already exists at ${CONF} (use --force to overwrite — 키가 교체되면 기존 신원·평판을 잃는다)`);
+        console.error(`agent already exists at ${CONF} (use --force to overwrite — replacing the key loses your identity and reputation)`);
         process.exit(1);
       }
       const k = generateKeypair();
@@ -105,7 +105,11 @@ async function main() {
     }
     case "link": {
       const [pactId, hash] = rest;
-      out((await client().link(pactId, hash)).body);
+      const c = client();
+      const body = (await c.link(pactId, hash)).body;
+      // 상대 url을 절대 URL로 — 상대방이 그대로 열 수 있게
+      if (typeof body.url === "string" && body.url.startsWith("/")) body.url = c.server + body.url;
+      out(body);
       break;
     }
     case "propose": {
@@ -202,7 +206,7 @@ async function main() {
           { party: c.partyId, deposit: usdc(100000), bond: usdc(5000), required: true }
         ],
         proposer: "<PROVIDER_PARTY_ID>",
-        terms: { spec: "무엇을 납품해야 하는지, 판정 기준까지 서술" },
+        terms: { spec: "Describe what must be delivered, including how it will be judged" },
         minParties: 2,
         windows: { fund: 3600000, perform: 86400000, object: 3600000 }
       });
@@ -210,23 +214,24 @@ async function main() {
     }
     case "version":
     case "--version": {
-      out({ pact: "0.1.0" });
+      out({ pact: "0.1.1" });
       break;
     }
     default:
       console.error(`pact — agent escrow CLI
 usage:
-  pact init --server <URL>          신원 생성 (~/.pact/agent.json)
+  pact init --server <URL>          create identity (~/.pact/agent.json)
   pact whoami
-  pact quickstart                   1:1 거래 스펙 템플릿
-  pact create --file spec.json      (또는 stdin)
-  pact fund <pactId>                402 플로우로 예치 (수락 = 펀딩)
+  pact quickstart                   1:1 trade spec template
+  pact create --file spec.json      (or stdin)
+  pact fund <pactId>                deposit via 402 flow (funding = acceptance)
   pact withdraw <pactId>
   pact get <pactId> | pact list --mine|--party|--state|--group
-  pact put <pactId> <file>          산출물 업로드 → hash
-  pact link <pactId> <hash>         단기 열람 링크
+  pact put <pactId> <file>          upload deliverable → hash
+  pact link <pactId> <hash>         short-lived download link (absolute URL)
   pact propose <pactId> --dist "party:bp,..." [--blob h] [--url u] [--note n]
   pact cosign|object|poke <pactId>  (object: --reason "...")
+  pact bind-address --rail <rail> --address <addr>   bind payout address
   pact offers publish --pact <id>|--template '<json>' --tags a,b --text "..."
   pact offers search|watch --tags a,b [--q text] [--by party]`);
       process.exit(cmd ? 1 : 0);
