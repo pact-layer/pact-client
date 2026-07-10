@@ -234,7 +234,7 @@ usage:
   pact bind-address --rail <rail> --address <addr>   bind payout address
   pact offers publish --pact <id>|--template '<json>' --tags a,b --text "..."
   pact offers search|watch --tags a,b [--q text] [--by party]`);
-      process.exit(cmd ? 1 : 0);
+      process.exit(cmd && cmd !== "--help" && cmd !== "help" ? 1 : 0);
   }
 }
 
