@@ -4,15 +4,17 @@ import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import { readSecretInput } from "../lib/secure-input.js";
 
 const BIN = new URL("../bin/pact.js", import.meta.url).pathname;
 
-function run(args, env = {}) {
+function run(args, env = {}, input = "") {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BIN, ...args], {
       env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
@@ -20,6 +22,7 @@ function run(args, env = {}) {
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", reject);
     child.on("close", (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(input);
   });
 }
 
@@ -29,7 +32,12 @@ async function mockServer({ denyWrites = false } = {}) {
     let raw = "";
     for await (const chunk of req) raw += chunk;
     const isJson = req.headers["content-type"]?.startsWith("application/json");
-    requests.push({ method: req.method, url: req.url, body: raw ? (isJson ? JSON.parse(raw) : raw) : null });
+    requests.push({
+      method: req.method,
+      url: req.url,
+      headers: req.headers,
+      body: raw ? (isJson ? JSON.parse(raw) : raw) : null
+    });
     res.setHeader("content-type", "application/json");
     if (req.url === "/access/request") {
       const email = JSON.parse(raw).call.email;
@@ -116,11 +124,11 @@ test("request-access and verify print English guidance matching allowed, pending
   assert.equal(failed.status, 1);
   assert.deepEqual(JSON.parse(failed.stdout), { error: "mail unavailable" });
 
-  const allowed = await run(["verify", "111111"], { PACT_HOME: home });
+  const allowed = await run(["verify"], { PACT_HOME: home }, "111111\n");
   assert.equal(allowed.status, 0);
   assert.match(allowed.stderr, /Access granted/);
 
-  const pending = await run(["verify", "222222"], { PACT_HOME: home });
+  const pending = await run(["verify"], { PACT_HOME: home }, "222222\n");
   assert.equal(pending.status, 0);
   assert.match(pending.stderr, /pending operator approval/);
   assert.match(pending.stderr, /Wait for the approval email/);
@@ -129,6 +137,72 @@ test("request-access and verify print English guidance matching allowed, pending
   const rejected = await run(["verify", "000000"], { PACT_HOME: home });
   assert.equal(rejected.status, 1);
   assert.deepEqual(JSON.parse(rejected.stdout), { error: "wrong code" });
+  assert.match(rejected.stderr, /argv is legacy behavior/);
+
+  const empty = await run(["verify"], { PACT_HOME: home });
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /OTP is required on stdin/);
+});
+
+test("secure TTY input never echoes the secret", async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => input;
+  const output = new PassThrough();
+  let rendered = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk) => (rendered += chunk));
+
+  const reading = readSecretInput({ input, output, prompt: "OTP: " });
+  input.end("123456\n");
+
+  assert.equal(await reading, "123456");
+  assert.equal(rendered, "OTP: \n");
+  assert.doesNotMatch(rendered, /123456/);
+});
+
+test("fund prefers proof JSON on stdin and rejects ambiguous proof sources", async (t) => {
+  const api = await mockServer({ denyWrites: true });
+  t.after(() => api.close());
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+
+  const fromStdin = await run(
+    ["fund", "p_test", "--proof-stdin"],
+    { PACT_HOME: home },
+    '{"txHash":"0xstdin"}\n'
+  );
+  assert.equal(fromStdin.status, 1);
+  const funded = api.requests.find((request) => request.method === "POST" && request.url === "/pacts/p_test/fund");
+  assert.ok(funded);
+  assert.deepEqual(JSON.parse(Buffer.from(funded.headers["x-payment"], "base64").toString("utf8")), {
+    txHash: "0xstdin"
+  });
+  assert.doesNotMatch(fromStdin.stdout + fromStdin.stderr, /0xstdin/);
+
+  const ambiguous = await run(
+    ["fund", "p_test", "--proof-stdin", "--proof", '{"txHash":"0xargv"}'],
+    { PACT_HOME: home },
+    '{"txHash":"0xstdin"}\n'
+  );
+  assert.equal(ambiguous.status, 1);
+  assert.match(ambiguous.stderr, /cannot be used together/);
+
+  const empty = await run(["fund", "p_test", "--proof-stdin"], { PACT_HOME: home });
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /payment proof JSON is required on stdin/);
+
+  const invalid = await run(["fund", "p_test", "--proof-stdin"], { PACT_HOME: home }, "secret-not-json\n");
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /invalid payment proof JSON on stdin/);
+  assert.doesNotMatch(invalid.stdout + invalid.stderr, /secret-not-json/);
+
+  const legacy = await run(
+    ["fund", "p_test", "--proof", '{"txHash":"0xlegacy"}'],
+    { PACT_HOME: home }
+  );
+  assert.equal(legacy.status, 1);
+  assert.match(legacy.stderr, /retained for compatibility/);
 });
 
 test("every raw non-success write response exits non-zero", async (t) => {
@@ -172,4 +246,6 @@ test("help and representative success and failure output are English-only", asyn
   for (const result of outputs) {
     assert.doesNotMatch(result.stdout + result.stderr, /[가-힣]/);
   }
+  assert.match(outputs[0].stderr, /--proof-stdin/);
+  assert.match(outputs[0].stderr, /TTY input is hidden/);
 });

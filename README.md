@@ -31,7 +31,8 @@ pact init --server https://api.pact.sh
 # 2. Check write access (production is invite mode)
 pact access
 pact request-access --email "${PACT_EMAIL:?set PACT_EMAIL}" --use-case "${PACT_USE_CASE:?set PACT_USE_CASE}"
-pact verify "${PACT_OTP:?set PACT_OTP from the access email}"
+pact verify                         # enter the emailed OTP at the hidden prompt
+# Non-interactive alternative: pact verify < "$PACT_OTP_FILE"
 # If verify returns pending, wait for the approval email and run `pact access` again.
 # Continue only when status is allowed.
 
@@ -42,8 +43,10 @@ pact offers search --tags research
 pact quickstart > spec.json && $EDITOR spec.json
 pact create --file spec.json        # → pactId
 
-# 5. Deposit = commitment (mock proof is automatic; real rails require --proof)
+# 5. Deposit = commitment (mock proof is automatic)
 pact fund p_XXXX
+# Real rail: pass one JSON proof on stdin so it never enters argv or shell history.
+pact fund p_XXXX --proof-stdin < "$PACT_PAYMENT_PROOF_FILE"
 
 # 6. Watch progress / review the deliverable / approve
 pact get p_XXXX

@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { PactClient, generateKeypair, usdc } from "../lib/sdk.js";
+import { readSecretInput } from "../lib/secure-input.js";
 import { hex } from "@scure/base";
 
 const CONF_DIR = process.env.PACT_HOME ?? join(homedir(), ".pact");
@@ -31,6 +32,15 @@ function outResponse(response, body = response.body) {
   out(body);
   if (response.status !== 200) process.exitCode = 1;
   return response.status === 200;
+}
+
+function parsePaymentProof(raw, source) {
+  if (!raw) throw new Error(`payment proof JSON is required ${source}`);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`invalid payment proof JSON ${source}`);
+  }
 }
 
 function parseDist(s) {
@@ -77,11 +87,30 @@ async function main() {
       const { positionals, values } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { "rail-address": { type: "string" }, proof: { type: "string" } }
+        options: {
+          "rail-address": { type: "string" },
+          proof: { type: "string" },
+          "proof-stdin": { type: "boolean" }
+        }
       });
+      if (values.proof !== undefined && values["proof-stdin"]) {
+        throw new Error("--proof and --proof-stdin cannot be used together");
+      }
+      let proof;
+      if (values["proof-stdin"]) {
+        proof = parsePaymentProof(
+          await readSecretInput({ prompt: "Payment proof JSON: " }),
+          "on stdin"
+        );
+      } else if (values.proof !== undefined) {
+        console.error(
+          "Warning: --proof is retained for compatibility and may expose payment data in argv or shell history. Prefer --proof-stdin."
+        );
+        proof = parsePaymentProof(values.proof, "in --proof");
+      }
       const r = await client().fund(positionals[0], {
         railAddress: values["rail-address"],
-        proof: values.proof ? JSON.parse(values.proof) : undefined
+        proof
       });
       outResponse(r);
       break;
@@ -227,11 +256,21 @@ async function main() {
       }
       const r = await client().requestAccess(values.email, values["use-case"]);
       outResponse(r);
-      if (r.status === 200) console.error("Check your inbox, then run: pact verify <6-digit-code>");
+      if (r.status === 200) console.error("Check your inbox, then run: pact verify (TTY input is hidden)");
       break;
     }
     case "verify": {
-      const r = await client().verifyAccess(rest[0]);
+      if (rest.length > 1) throw new Error("usage: pact verify (reads the OTP from stdin)");
+      let otp = rest[0];
+      if (otp !== undefined) {
+        console.error(
+          "Warning: passing an OTP in argv is legacy behavior and may expose it in shell history. Run `pact verify` and enter it via stdin instead."
+        );
+      } else {
+        otp = await readSecretInput({ prompt: "OTP: " });
+      }
+      if (!otp) throw new Error("OTP is required on stdin");
+      const r = await client().verifyAccess(otp);
       outResponse(r);
       if (r.status === 200 && r.body.status === "allowed") {
         console.error("Access granted. You can now use Pact write commands.");
@@ -268,10 +307,12 @@ usage:
   pact whoami
   pact access                       access status on this server (invite mode)
   pact request-access --email <e>   get an OTP by email  [--use-case "..."]
-  pact verify <otp>                 bind this partyId — self-service if email pre-approved
+  pact verify                       read OTP from stdin; TTY input is hidden (recommended)
+  pact verify <otp>                 legacy compatibility; exposes OTP in argv
   pact quickstart                   1:1 trade spec template
   pact create --file spec.json      (or stdin)
-  pact fund <pactId>                deposit via 402 flow (funding = acceptance)
+  pact fund <pactId> --proof-stdin  read one JSON payment proof from stdin (recommended)
+  pact fund <pactId> --proof '<j>'  legacy compatibility; exposes proof in argv
   pact withdraw <pactId>
   pact get <pactId> | pact list --mine|--party|--state|--group
   pact put <pactId> <file>          upload deliverable → hash

@@ -35,6 +35,37 @@ test("download surfaces a non-success response", async (t) => {
   await assert.rejects(() => client.download("/dl/expired"), /download 403/);
 });
 
+test("fund replays a supplied crash-recovery proof directly and byte-identically across CAS retry", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let nonce = 7;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(String(target));
+    if ((options.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ pact: { id: "p_resume", stateNonce: nonce++ } }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    requests.push({ body: JSON.parse(String(options.body)), payment: options.headers["x-payment"] });
+    return new Response(JSON.stringify(requests.length === 1 ? { error: "concurrent transition (CAS)" } : { ok: true }), {
+      status: requests.length === 1 ? 409 : 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const client = new PactClient({ server: "https://api.pact.sh", privkey: "01".repeat(32) });
+  const result = await client.fund("p_resume", { proof: { txHash: "0xabc" } });
+  assert.equal(result.status, 200);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].payment, requests[1].payment);
+  assert.deepEqual(requests.map((request) => request.body.stateNonce), [7, 8]);
+  assert.ok(requests.every((request) => request.payment));
+});
+
 test("every SignedCall uses the canonical route action and signs it", async (t) => {
   const originalFetch = globalThis.fetch;
   const requests = [];
