@@ -34,12 +34,12 @@ function outResponse(response, body = response.body) {
   return response.status === 200;
 }
 
-function parsePaymentProof(raw, source) {
-  if (!raw) throw new Error(`payment proof JSON is required ${source}`);
+function parsePaymentProof(raw) {
+  if (!raw) throw new Error("payment proof JSON is required on stdin");
   try {
     return JSON.parse(raw);
   } catch {
-    throw new Error(`invalid payment proof JSON ${source}`);
+    throw new Error("invalid payment proof JSON on stdin");
   }
 }
 
@@ -84,30 +84,23 @@ async function main() {
       break;
     }
     case "fund": {
+      if (rest.some((arg) => /^--proof(?:=|$)/.test(arg))) {
+        throw new Error("usage: pact fund <pactId> [--rail-address <address>] [--proof-stdin]");
+      }
       const { positionals, values } = parseArgs({
         args: rest,
         allowPositionals: true,
         options: {
           "rail-address": { type: "string" },
-          proof: { type: "string" },
           "proof-stdin": { type: "boolean" }
         }
       });
-      if (values.proof !== undefined && values["proof-stdin"]) {
-        throw new Error("--proof and --proof-stdin cannot be used together");
+      if (positionals.length !== 1) {
+        throw new Error("usage: pact fund <pactId> [--rail-address <address>] [--proof-stdin]");
       }
-      let proof;
-      if (values["proof-stdin"]) {
-        proof = parsePaymentProof(
-          await readSecretInput({ prompt: "Payment proof JSON: " }),
-          "on stdin"
-        );
-      } else if (values.proof !== undefined) {
-        console.error(
-          "Warning: --proof is retained for compatibility and may expose payment data in argv or shell history. Prefer --proof-stdin."
-        );
-        proof = parsePaymentProof(values.proof, "in --proof");
-      }
+      const proof = values["proof-stdin"]
+        ? parsePaymentProof(await readSecretInput({ prompt: "Payment proof JSON: " }))
+        : undefined;
       const r = await client().fund(positionals[0], {
         railAddress: values["rail-address"],
         proof
@@ -260,15 +253,8 @@ async function main() {
       break;
     }
     case "verify": {
-      if (rest.length > 1) throw new Error("usage: pact verify (reads the OTP from stdin)");
-      let otp = rest[0];
-      if (otp !== undefined) {
-        console.error(
-          "Warning: passing an OTP in argv is legacy behavior and may expose it in shell history. Run `pact verify` and enter it via stdin instead."
-        );
-      } else {
-        otp = await readSecretInput({ prompt: "OTP: " });
-      }
+      if (rest.length !== 0) throw new Error("usage: pact verify (reads the OTP from stdin)");
+      const otp = await readSecretInput({ prompt: "OTP: " });
       if (!otp) throw new Error("OTP is required on stdin");
       const r = await client().verifyAccess(otp);
       outResponse(r);
@@ -308,11 +294,10 @@ usage:
   pact access                       access status on this server (invite mode)
   pact request-access --email <e>   get an OTP by email  [--use-case "..."]
   pact verify                       read OTP from stdin; TTY input is hidden (recommended)
-  pact verify <otp>                 legacy compatibility; exposes OTP in argv
   pact quickstart                   1:1 trade spec template
   pact create --file spec.json      (or stdin)
-  pact fund <pactId> --proof-stdin  read one JSON payment proof from stdin (recommended)
-  pact fund <pactId> --proof '<j>'  legacy compatibility; exposes proof in argv
+  pact fund <pactId>                mock rail (payment proof is automatic)
+  pact fund <pactId> --rail-address <addr> --proof-stdin   real rail; proof from stdin
   pact withdraw <pactId>
   pact get <pactId> | pact list --mine|--party|--state|--group
   pact put <pactId> <file>          upload deliverable → hash

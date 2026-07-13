@@ -55,6 +55,10 @@ pact cosign p_XXXX                  # satisfied → settle
 pact object p_XXXX --reason "chapter 3 missing"   # unsatisfied → evaluator verdict
 ```
 
+The CLI intentionally accepts OTPs and payment proofs only through stdin. It
+rejects positional OTPs and any `--proof` option so secrets cannot enter argv
+or shell history.
+
 Seller side:
 
 ```bash

@@ -134,10 +134,14 @@ test("request-access and verify print English guidance matching allowed, pending
   assert.match(pending.stderr, /Wait for the approval email/);
   assert.doesNotMatch(pending.stdout + pending.stderr, /[가-힣]/);
 
-  const rejected = await run(["verify", "000000"], { PACT_HOME: home });
+  const rejected = await run(["verify"], { PACT_HOME: home }, "000000\n");
   assert.equal(rejected.status, 1);
   assert.deepEqual(JSON.parse(rejected.stdout), { error: "wrong code" });
-  assert.match(rejected.stderr, /argv is legacy behavior/);
+
+  const positional = await run(["verify", "654321"], { PACT_HOME: home });
+  assert.equal(positional.status, 1);
+  assert.match(positional.stderr, /usage: pact verify/);
+  assert.doesNotMatch(positional.stdout + positional.stderr, /654321/);
 
   const empty = await run(["verify"], { PACT_HOME: home });
   assert.equal(empty.status, 1);
@@ -161,7 +165,7 @@ test("secure TTY input never echoes the secret", async () => {
   assert.doesNotMatch(rendered, /123456/);
 });
 
-test("fund prefers proof JSON on stdin and rejects ambiguous proof sources", async (t) => {
+test("fund accepts proof JSON only on stdin and never reflects rejected argv secrets", async (t) => {
   const api = await mockServer({ denyWrites: true });
   t.after(() => api.close());
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
@@ -180,13 +184,21 @@ test("fund prefers proof JSON on stdin and rejects ambiguous proof sources", asy
   });
   assert.doesNotMatch(fromStdin.stdout + fromStdin.stderr, /0xstdin/);
 
-  const ambiguous = await run(
-    ["fund", "p_test", "--proof-stdin", "--proof", '{"txHash":"0xargv"}'],
-    { PACT_HOME: home },
-    '{"txHash":"0xstdin"}\n'
+  const argvProof = await run(
+    ["fund", "p_test", "--proof", '{"txHash":"0xargv"}'],
+    { PACT_HOME: home }
   );
-  assert.equal(ambiguous.status, 1);
-  assert.match(ambiguous.stderr, /cannot be used together/);
+  assert.equal(argvProof.status, 1);
+  assert.match(argvProof.stderr, /usage: pact fund/);
+  assert.doesNotMatch(argvProof.stdout + argvProof.stderr, /0xargv/);
+
+  const inlineArgvProof = await run(
+    ["fund", "p_test", '--proof={"txHash":"0xinline"}'],
+    { PACT_HOME: home }
+  );
+  assert.equal(inlineArgvProof.status, 1);
+  assert.match(inlineArgvProof.stderr, /usage: pact fund/);
+  assert.doesNotMatch(inlineArgvProof.stdout + inlineArgvProof.stderr, /0xinline/);
 
   const empty = await run(["fund", "p_test", "--proof-stdin"], { PACT_HOME: home });
   assert.equal(empty.status, 1);
@@ -197,12 +209,6 @@ test("fund prefers proof JSON on stdin and rejects ambiguous proof sources", asy
   assert.match(invalid.stderr, /invalid payment proof JSON on stdin/);
   assert.doesNotMatch(invalid.stdout + invalid.stderr, /secret-not-json/);
 
-  const legacy = await run(
-    ["fund", "p_test", "--proof", '{"txHash":"0xlegacy"}'],
-    { PACT_HOME: home }
-  );
-  assert.equal(legacy.status, 1);
-  assert.match(legacy.stderr, /retained for compatibility/);
 });
 
 test("every raw non-success write response exits non-zero", async (t) => {
@@ -248,4 +254,5 @@ test("help and representative success and failure output are English-only", asyn
   }
   assert.match(outputs[0].stderr, /--proof-stdin/);
   assert.match(outputs[0].stderr, /TTY input is hidden/);
+  assert.doesNotMatch(outputs[0].stderr, /legacy|pact verify <otp>|--proof '<j>'/);
 });
