@@ -43,6 +43,37 @@ function parsePaymentProof(raw) {
   }
 }
 
+function cancelUsage() {
+  return "usage: pact cancel <pactId> --expires-at <unix-ms> [--signatures-stdin]";
+}
+
+function parseCancelSignatures(raw) {
+  if (!raw) throw new Error("cancellation signatures JSON is required on stdin");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("invalid cancellation signatures JSON on stdin");
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length > 300 ||
+    parsed.some(
+      (entry) =>
+        entry === null ||
+        typeof entry !== "object" ||
+        Array.isArray(entry) ||
+        typeof entry.signer !== "string" ||
+        entry.signer.length === 0 ||
+        typeof entry.sig !== "string" ||
+        entry.sig.length === 0
+    )
+  ) {
+    throw new Error("invalid cancellation signatures JSON on stdin");
+  }
+  return parsed.map(({ signer, sig }) => ({ signer, sig }));
+}
+
 function parseDist(s) {
   // "party:bp,party:bp"; basis points must total 10,000.
   return s.split(",").map((pair) => {
@@ -173,6 +204,42 @@ async function main() {
       outResponse(await client().object(positionals[0], values.reason ?? "objection"));
       break;
     }
+    case "cancel": {
+      if (rest.some((arg) => /^--signatures(?:=|$)/.test(arg))) {
+        throw new Error(cancelUsage());
+      }
+      const { positionals, values } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {
+          "expires-at": { type: "string" },
+          "signatures-stdin": { type: "boolean" }
+        }
+      });
+      const expiresAt = Number(values["expires-at"]);
+      if (positionals.length !== 1 || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+        throw new Error(cancelUsage());
+      }
+      const pactId = positionals[0];
+      const c = client();
+      const stateNonce = await c.nonce(pactId);
+      const own = { signer: c.partyId, sig: c.cancelSig(pactId, stateNonce, expiresAt) };
+      if (!values["signatures-stdin"]) {
+        out({
+          pactId,
+          stateNonce,
+          expiresAt,
+          signature: own,
+          nextStep:
+            "Collect a signature with the same stateNonce and expiresAt from every pact party, then submit their JSON array with --signatures-stdin."
+        });
+        break;
+      }
+      const signatures = parseCancelSignatures(readFileSync(0, "utf8"));
+      const sigs = signatures.some(({ signer }) => signer === c.partyId) ? signatures : [...signatures, own];
+      outResponse(await c.cancel(pactId, expiresAt, sigs));
+      break;
+    }
     case "poke": {
       outResponse(await client().poke(rest[0]));
       break;
@@ -283,7 +350,7 @@ async function main() {
     }
     case "version":
     case "--version": {
-      out({ pact: "0.2.2" });
+      out({ pact: "0.2.3" });
       break;
     }
     default:
@@ -304,6 +371,8 @@ usage:
   pact link <pactId> <hash>         short-lived download link (absolute URL)
   pact propose <pactId> --dist "party:bp,..." [--blob h] [--url u] [--note n]
   pact cosign|object|poke <pactId>  (object: --reason "...")
+  pact cancel <pactId> --expires-at <unix-ms> [--signatures-stdin]
+                                      prepare or submit unanimous cancellation
   pact bind-address --rail <rail> --address <addr>   bind payout address
   pact offers publish --pact <id>|--template '<json>' --tags a,b --text "..."
   pact offers search|watch --tags a,b [--q text] [--by party]
