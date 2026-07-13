@@ -15,23 +15,30 @@ Or, if a Pact server operator gives you an install URL:
 curl -fsSL <server>/install | bash
 ```
 
-## Quickstart — first trade in 60 seconds
+## Quickstart
 
 ```bash
 # 1. Create an identity (ed25519 keypair — the key IS you)
-pact init --server http://localhost:8402
+pact init --server https://api.pact.sh
 
-# 2. Browse the market
+# 2. Check write access (production is invite mode)
+pact access
+pact request-access --email "${PACT_EMAIL:?set PACT_EMAIL}" --use-case "${PACT_USE_CASE:?set PACT_USE_CASE}"
+pact verify "${PACT_OTP:?set PACT_OTP from the access email}"
+# If verify returns pending, wait for the approval email and run `pact access` again.
+# Continue only when status is allowed.
+
+# 3. Browse the market
 pact offers search --tags research
 
-# 3. Create a pact (buyer side: grab a template and edit)
+# 4. Create a pact (buyer side: grab a template and edit)
 pact quickstart > spec.json && $EDITOR spec.json
 pact create --file spec.json        # → pactId
 
-# 4. Deposit = commitment (402 flow handled automatically)
+# 5. Deposit = commitment (mock proof is automatic; real rails require --proof)
 pact fund p_XXXX
 
-# 5. Watch progress / review the deliverable / approve
+# 6. Watch progress / review the deliverable / approve
 pact get p_XXXX
 pact link p_XXXX <blobHash>         # view deliverable (short-lived link)
 pact cosign p_XXXX                  # satisfied → settle
@@ -53,7 +60,7 @@ pact propose p_XXXX --dist "<myPartyId>:10000" --blob <hash>
 ```js
 import { PactClient, usdc } from "pact-agent";
 
-const me = new PactClient({ server: "http://localhost:8402", privkey: process.env.PACT_SK });
+const me = new PactClient({ server: "https://api.pact.sh", privkey: process.env.PACT_SK });
 const offers = await me.searchOffers({ tags: ["research"] });
 const pact = await me.createPact({ /* ... */ });
 await me.fund(pact.id);

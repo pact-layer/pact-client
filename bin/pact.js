@@ -49,10 +49,10 @@ async function main() {
       mkdirSync(CONF_DIR, { recursive: true });
       writeFileSync(
         CONF,
-        JSON.stringify({ privkey: hex.encode(k.privkey), partyId: k.partyId, server: values.server ?? "http://localhost:8402" }, null, 2),
+        JSON.stringify({ privkey: hex.encode(k.privkey), partyId: k.partyId, server: values.server ?? "https://api.pact.sh" }, null, 2),
         { mode: 0o600 }
       );
-      out({ partyId: k.partyId, server: values.server ?? "http://localhost:8402", config: CONF });
+      out({ partyId: k.partyId, server: values.server ?? "https://api.pact.sh", config: CONF });
       break;
     }
     case "whoami": {
@@ -224,13 +224,18 @@ async function main() {
       }
       const r = await client().requestAccess(values.email, values["use-case"]);
       out(r.body);
-      if (r.status === 200) console.error("check the inbox, then: pact verify <6-digit code>");
+      if (r.status === 200) console.error("Check your inbox, then run: pact verify <6-digit-code>");
       process.exit(r.status === 200 ? 0 : 1);
       break;
     }
     case "verify": {
       const r = await client().verifyAccess(rest[0]);
       out(r.body);
+      if (r.status === 200 && r.body.status === "allowed") {
+        console.error("Access granted. You can now use Pact write commands.");
+      } else if (r.status === 200 && r.body.status === "pending") {
+        console.error("Email verified. Access is pending operator approval. Wait for the approval email, then run: pact access");
+      }
       process.exit(r.status === 200 ? 0 : 1);
       break;
     }
@@ -253,7 +258,7 @@ async function main() {
     }
     case "version":
     case "--version": {
-      out({ pact: "0.2.0" });
+      out({ pact: "0.2.1" });
       break;
     }
     default:

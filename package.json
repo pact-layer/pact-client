@@ -1,6 +1,6 @@
 {
   "name": "pact-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pact — agent-to-agent escrow protocol. SDK + CLI.",
   "license": "MIT",
   "type": "module",
@@ -9,6 +9,9 @@
   },
   "exports": {
     ".": "./lib/sdk.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
   },
   "files": [
     "bin",
