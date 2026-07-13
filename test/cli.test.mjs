@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,12 +23,13 @@ function run(args, env = {}) {
   });
 }
 
-async function mockServer() {
+async function mockServer({ denyWrites = false } = {}) {
   const requests = [];
   const server = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
-    requests.push({ method: req.method, url: req.url, body: raw ? JSON.parse(raw) : null });
+    const isJson = req.headers["content-type"]?.startsWith("application/json");
+    requests.push({ method: req.method, url: req.url, body: raw ? (isJson ? JSON.parse(raw) : raw) : null });
     res.setHeader("content-type", "application/json");
     if (req.url === "/access/request") {
       const email = JSON.parse(raw).call.email;
@@ -50,6 +51,15 @@ async function mockServer() {
       res.end(JSON.stringify({ mode: "invite", status: "allowed" }));
       return;
     }
+    if (req.method === "GET" && req.url === "/pacts/p_test") {
+      res.end(JSON.stringify({ pact: { id: "p_test", stateNonce: 7 } }));
+      return;
+    }
+    if (denyWrites && req.method === "POST") {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: "access_required" }));
+      return;
+    }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "not found" }));
   });
@@ -62,11 +72,11 @@ async function mockServer() {
   };
 }
 
-test("version and init use 0.2.1 and the documented default server", async () => {
+test("version and init use 0.2.2 and the documented default server", async () => {
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.1" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.2" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
@@ -119,4 +129,47 @@ test("request-access and verify print English guidance matching allowed, pending
   const rejected = await run(["verify", "000000"], { PACT_HOME: home });
   assert.equal(rejected.status, 1);
   assert.deepEqual(JSON.parse(rejected.stdout), { error: "wrong code" });
+});
+
+test("every raw non-success write response exits non-zero", async (t) => {
+  const api = await mockServer({ denyWrites: true });
+  t.after(() => api.close());
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const deliverable = join(home, "deliverable.txt");
+  writeFileSync(deliverable, "test deliverable");
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+
+  const commands = [
+    ["fund", "p_test"],
+    ["withdraw", "p_test"],
+    ["put", "p_test", deliverable],
+    ["link", "p_test", "a".repeat(64)],
+    ["propose", "p_test", "--dist", "ed25519:test:10000"],
+    ["cosign", "p_test"],
+    ["object", "p_test", "--reason", "missing deliverable"],
+    ["poke", "p_test"],
+    ["bind-address", "--rail", "x402", "--address", "0x1234"],
+    ["offers", "publish", "--pact", "p_test", "--text", "test offer"]
+  ];
+
+  for (const args of commands) {
+    const result = await run(args, { PACT_HOME: home });
+    assert.equal(result.status, 1, `${args.join(" ")} must exit 1: ${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), { error: "access_required" });
+  }
+});
+
+test("help and representative success and failure output are English-only", async () => {
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const outputs = [];
+  outputs.push(await run(["--help"], { PACT_HOME: home }));
+  outputs.push(await run(["whoami"], { PACT_HOME: home }));
+  outputs.push(await run(["init"], { PACT_HOME: home }));
+  outputs.push(await run(["init"], { PACT_HOME: home }));
+  outputs.push(await run(["offers", "invalid"], { PACT_HOME: home }));
+  outputs.push(await run(["admin", "invalid"], { PACT_HOME: home }));
+
+  for (const result of outputs) {
+    assert.doesNotMatch(result.stdout + result.stderr, /[가-힣]/);
+  }
 });

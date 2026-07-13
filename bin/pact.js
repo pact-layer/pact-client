@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// pact — 에이전트 escrow CLI. 설정: ~/.pact/agent.json {privkey, partyId, server}
+// Pact agent escrow CLI. Config: ~/.pact/agent.json {privkey, partyId, server}
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,8 +27,14 @@ function out(v) {
   console.log(JSON.stringify(v, null, 2));
 }
 
+function outResponse(response, body = response.body) {
+  out(body);
+  if (response.status !== 200) process.exitCode = 1;
+  return response.status === 200;
+}
+
 function parseDist(s) {
-  // "party:bp,party:bp" — bp 합 10000
+  // "party:bp,party:bp"; basis points must total 10,000.
   return s.split(",").map((pair) => {
     const i = pair.lastIndexOf(":");
     return { party: pair.slice(0, i), bp: Number(pair.slice(i + 1)) };
@@ -77,12 +83,11 @@ async function main() {
         railAddress: values["rail-address"],
         proof: values.proof ? JSON.parse(values.proof) : undefined
       });
-      out(r.body);
-      process.exit(r.status === 200 ? 0 : 1);
+      outResponse(r);
       break;
     }
     case "withdraw": {
-      out((await client().withdraw(rest[0])).body);
+      outResponse(await client().withdraw(rest[0]));
       break;
     }
     case "get": {
@@ -100,16 +105,17 @@ async function main() {
     }
     case "put": {
       const [pactId, file] = rest;
-      out((await client().putBlob(pactId, readFileSync(file))).body);
+      outResponse(await client().putBlob(pactId, readFileSync(file)));
       break;
     }
     case "link": {
       const [pactId, hash] = rest;
       const c = client();
-      const body = (await c.link(pactId, hash)).body;
-      // 상대 url을 절대 URL로 — 상대방이 그대로 열 수 있게
+      const response = await c.link(pactId, hash);
+      const body = response.body;
+      // Return an absolute URL so the recipient can open it directly.
       if (typeof body.url === "string" && body.url.startsWith("/")) body.url = c.server + body.url;
-      out(body);
+      outResponse(response, body);
       break;
     }
     case "propose": {
@@ -129,12 +135,11 @@ async function main() {
         ...(values.note ? [{ note: values.note }] : [])
       ];
       const r = await client().propose(positionals[0], evidence, parseDist(values.dist));
-      out(r.body);
-      process.exit(r.status === 200 ? 0 : 1);
+      outResponse(r);
       break;
     }
     case "cosign": {
-      out((await client().cosign(rest[0])).body);
+      outResponse(await client().cosign(rest[0]));
       break;
     }
     case "object": {
@@ -143,11 +148,11 @@ async function main() {
         allowPositionals: true,
         options: { reason: { type: "string" } }
       });
-      out((await client().object(positionals[0], values.reason ?? "objection")).body);
+      outResponse(await client().object(positionals[0], values.reason ?? "objection"));
       break;
     }
     case "poke": {
-      out((await client().poke(rest[0])).body);
+      outResponse(await client().poke(rest[0]));
       break;
     }
     case "bind-address": {
@@ -155,7 +160,7 @@ async function main() {
         args: rest,
         options: { rail: { type: "string" }, address: { type: "string" } }
       });
-      out((await client().bindRailAddress(values.rail ?? "x402", values.address)).body);
+      outResponse(await client().bindRailAddress(values.rail ?? "x402", values.address));
       break;
     }
     case "offers": {
@@ -179,16 +184,14 @@ async function main() {
             "expires-in": { type: "string" }
           }
         });
-        out(
-          (
-            await c.publishOffer({
-              pactId: values.pact,
-              template: values.template ? JSON.parse(values.template) : undefined,
-              tags: (values.tags ?? "").split(",").filter(Boolean),
-              text: values.text ?? "",
-              expiresAt: Date.now() + Number(values["expires-in"] ?? 86_400_000)
-            })
-          ).body
+        outResponse(
+          await c.publishOffer({
+            pactId: values.pact,
+            template: values.template ? JSON.parse(values.template) : undefined,
+            tags: (values.tags ?? "").split(",").filter(Boolean),
+            text: values.text ?? "",
+            expiresAt: Date.now() + Number(values["expires-in"] ?? 86_400_000)
+          })
         );
       } else {
         console.error("usage: pact offers search|watch|publish ...");
@@ -197,7 +200,7 @@ async function main() {
       break;
     }
     case "quickstart": {
-      // 1:1 파일 거래 스펙 템플릿 출력 — 편집해서 pact create로
+      // Print a one-to-one file trade template for editing before `pact create`.
       const c = loadConf();
       out({
         rail: "mock",
@@ -223,20 +226,18 @@ async function main() {
         process.exit(1);
       }
       const r = await client().requestAccess(values.email, values["use-case"]);
-      out(r.body);
+      outResponse(r);
       if (r.status === 200) console.error("Check your inbox, then run: pact verify <6-digit-code>");
-      process.exit(r.status === 200 ? 0 : 1);
       break;
     }
     case "verify": {
       const r = await client().verifyAccess(rest[0]);
-      out(r.body);
+      outResponse(r);
       if (r.status === 200 && r.body.status === "allowed") {
         console.error("Access granted. You can now use Pact write commands.");
       } else if (r.status === 200 && r.body.status === "pending") {
         console.error("Email verified. Access is pending operator approval. Wait for the approval email, then run: pact access");
       }
-      process.exit(r.status === 200 ? 0 : 1);
       break;
     }
     case "access": {
@@ -252,13 +253,12 @@ async function main() {
         process.exit(1);
       }
       const r = await client().accessAdmin(action, target);
-      out(r.body);
-      process.exit(r.status === 200 ? 0 : 1);
+      outResponse(r);
       break;
     }
     case "version":
     case "--version": {
-      out({ pact: "0.2.1" });
+      out({ pact: "0.2.2" });
       break;
     }
     default:
