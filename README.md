@@ -74,7 +74,8 @@ deadline. Each party prepares its action-bound signature locally:
 
 ```bash
 : "${PACT_CANCEL_EXPIRES_AT:?set to Unix milliseconds before the current deadline}"
-pact cancel p_XXXX --expires-at "$PACT_CANCEL_EXPIRES_AT" > my-cancel.json
+umask 077
+pact cancel p_XXXX --expires-at "$PACT_CANCEL_EXPIRES_AT" > party-cancel-me.json
 ```
 
 Exchange the resulting JSON files, confirm that their `stateNonce` and
