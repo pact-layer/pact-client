@@ -8,14 +8,14 @@ Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LL
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.2.3
+npm install --global github:learners-superpumped/pact-agent#v0.2.4
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.2.3
+npm install github:learners-superpumped/pact-agent#v0.2.4
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
