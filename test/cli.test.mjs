@@ -157,7 +157,7 @@ test("secure TTY input never echoes the secret", async () => {
   input.end("123456\n");
 
   assert.equal(await reading, "123456");
-  assert.equal(rendered, "OTP: \n");
+  assert.equal(rendered.replace(/\u001b\[[0-9;]*[A-Za-z]/g, ""), "OTP: \n");
   assert.doesNotMatch(rendered, /123456/);
 });
 
