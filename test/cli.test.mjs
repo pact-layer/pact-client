@@ -93,11 +93,11 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.2.3 and the documented default server", async () => {
+test("version and init use 0.2.4 and the documented default server", async () => {
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.3" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.4" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
