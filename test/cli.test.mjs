@@ -10,6 +10,14 @@ import { readSecretInput } from "../lib/secure-input.js";
 import { signCanonical } from "../lib/sdk.js";
 
 const BIN = new URL("../bin/pact.js", import.meta.url).pathname;
+const README = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+test("cancellation docs create a private file included by the submit glob", () => {
+  assert.match(README, /umask 077/);
+  assert.match(README, /party-cancel-me\.json/);
+  assert.match(README, /party-cancel-\*\.json/);
+  assert.doesNotMatch(README, /my-cancel\.json/);
+});
 
 function run(args, env = {}, input = "") {
   return new Promise((resolve, reject) => {
