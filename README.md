@@ -8,14 +8,14 @@ Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LL
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.3.0
+npm install --global github:learners-superpumped/pact-agent#v0.3.1
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.3.0
+npm install github:learners-superpumped/pact-agent#v0.3.1
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
@@ -46,8 +46,9 @@ pact create --file spec.json        # → pactId
 pact fund p_XXXX
 # Real MPP rail: use one named mppx OS-keychain account.
 pact wallet mppx create --account buyer
-# Fund it with the Pact requirement plus a Tempo transaction-fee reserve.
-pact fund p_XXXX --payer mppx --account buyer --max-amount 0.01
+# Read the current pact, derive its exact deposit+bond, and obtain approval for that principal cap.
+pact get p_XXXX
+pact fund p_XXXX --payer mppx --account buyer --max-amount <approved-principal-cap-USD>
 # Legacy recovery only: enter an operator-provided JSON proof at the hidden stdin prompt.
 pact fund p_XXXX --proof-stdin
 
@@ -180,9 +181,10 @@ pact wallet mppx list
 ```
 
 `create` returns JSON with `name`, `address`, `keyStorage`, Tempo mainnet
-`network`, USDC.e `asset` and `assetAddress`, `minimumFundingAmount`, and the
-next capped `pact fund` command template. Fund the returned address with enough
-mainnet USDC.e for the Pact requirement plus a Tempo transaction-fee reserve.
+`network`, USDC.e `asset` and `assetAddress`, `minimumFundingAmount`, the
+separate `maximumNetworkFee`, and the next capped `pact fund` command template.
+Fund the returned address with enough mainnet USDC.e for the Pact requirement
+plus a Tempo transaction-fee reserve.
 `list` returns account names only; use `view --account <name>` to resolve one
 address. Pact never exports the private key and does not fund the account for
 you.
@@ -194,23 +196,35 @@ flow in this package.
 pact fund p_XXXX \
   --payer mppx \
   --account buyer \
-  --max-amount 0.01
+  --max-amount <approved-principal-cap-USD>
 ```
 
 The command accepts only an MPP/Tempo pact. For x402, use the operator-provided
 transaction proof through `--proof-stdin`. The mppx path checks the ledger amount
 against `--max-amount` before loading the signer, then verifies the 402
 amount, escrow recipient, network, token, HTTPS route, HTTP method, and
-SHA-256-bound SignedCall before signing. MPP accepts only Tempo chain 4217,
-USDC.e, `tempo/charge`, and pull mode. Production Pact currently requires at
-least 10,000 atomic units (0.01 USDC.e) for MPP funding. `--max-amount` caps the
-requested payment principal; it does not cap or fund Tempo network fees.
+SHA-256-bound SignedCall before signing. Immediately before signing, it also
+requires a Tempo transaction on chain 4217 whose fee token is USDC.e, rejects
+sponsorship, legacy gas price, blob-fee fields, and injected authorization or
+multisig metadata. It also pins the payer, expiring nonce, challenge expiry,
+exact one-call transfer calldata, and challenge/realm/client attribution memo,
+then caps gas, fee rates, and the computed maximum network fee. MPP accepts only
+the canonical Tempo `0x76` transaction in `tempo/charge` pull mode.
+Production Pact currently requires at least 10,000 atomic units (0.01 USDC.e)
+for MPP funding. `--max-amount` caps the requested payment principal. Network
+fees are separate from that principal cap but have an independent hard ceiling
+of 10,000 atomic USDC.e (0.01 USDC.e), so the maximum authorized wallet debit is
+the selected principal cap plus at most 0.01 USDC.e in network fees.
+
+The placeholder is not a default. Read the exact current pact first, calculate
+this party's deposit plus bond, and use only the human-approved principal cap.
 
 Pact rejects non-empty `MPPX_PRIVATE_KEY` and `X402_PRIVATE_KEY` variables on
 this path because mppx's resolver otherwise gives an environment key priority.
-Use a named OS-keychain account. The Pact wrapper exposes only mppx account
-create, list, and view; it does not expose export, delete, fund, or spend
-commands.
+Use a named OS-keychain account. `pact wallet mppx` exposes only account create,
+list, and view; it has no generic export, delete, fund, or spend subcommands. The
+only integrated spend path is the Pact-bound, capped `pact fund --payer mppx`
+flow documented above.
 
 The exact payment package versions are `mppx@0.8.6` and `viem@2.55.1`.
 

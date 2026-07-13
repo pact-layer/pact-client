@@ -9,6 +9,8 @@ import { parseArgs } from "node:util";
 import { PactClient, generateKeypair, usdc } from "../lib/sdk.js";
 import {
   MPPX_VERSION,
+  MPP_MAX_TOTAL_FEE_ATOMIC_USDCE,
+  MPP_MAX_TOTAL_FEE_USDCE,
   MPP_MIN_FUNDING_AMOUNT,
   TEMPO_CHAIN_ID,
   TEMPO_USDCE,
@@ -225,15 +227,23 @@ function mppxAccountOutput(name, address, includeNextStep = false) {
     networkName: "Tempo mainnet",
     asset: "USDC.e",
     assetAddress: TEMPO_USDCE,
-    minimumFundingAmount: MPP_MIN_FUNDING_AMOUNT
+    minimumFundingAmount: MPP_MIN_FUNDING_AMOUNT,
+    maximumNetworkFee: {
+      amount: MPP_MAX_TOTAL_FEE_ATOMIC_USDCE,
+      asset: "USDC.e",
+      display: `${MPP_MAX_TOTAL_FEE_USDCE} USDC.e`,
+      separateFromMaxAmount: true
+    }
   };
   return includeNextStep
     ? {
         ...output,
         nextStep:
-          `Fund this address on Tempo mainnet with enough USDC.e for the Pact requirement plus a ` +
-          `Tempo transaction-fee reserve. --max-amount caps payment principal, not network fees. Then run: ` +
-          `pact fund <pactId> --payer mppx --account ${name} --max-amount 0.01`
+          `Before funding, run pact get <pactId>, derive the exact deposit-plus-bond principal, and ` +
+          `obtain approval for that cap. Fund this address on Tempo mainnet with that principal plus a ` +
+          `transaction-fee reserve. --max-amount caps principal; the separately enforced network-fee ` +
+          `ceiling is ${MPP_MAX_TOTAL_FEE_USDCE} USDC.e. Then run: ` +
+          `pact fund <pactId> --payer mppx --account ${name} --max-amount <approved-principal-cap-USD>`
       }
     : output;
 }
@@ -641,7 +651,7 @@ async function main() {
     }
     case "version":
     case "--version": {
-      out({ pact: "0.3.0" });
+      out({ pact: "0.3.1" });
       break;
     }
     default:
@@ -659,7 +669,7 @@ usage:
   pact fund <pactId>                mock rail (payment proof is automatic)
   pact fund <pactId> --rail-address <addr> --proof-stdin   operator recovery proof from stdin
   pact fund <pactId> --payer mppx --account <name> [--protocol mpp]
-    --max-amount <USD>              required; caps payment principal, not Tempo network fees
+    --max-amount <USD>              required; caps principal; network fee has a separate hard 0.01 USDC.e ceiling
   pact withdraw <pactId>
   pact get <pactId> | pact list --mine|--party|--state|--group
   pact put <pactId> <file>          upload deliverable → hash

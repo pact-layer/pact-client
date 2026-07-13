@@ -93,11 +93,11 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.3.0 and the documented default server", async () => {
+test("version and init use 0.3.1 and the documented default server", async () => {
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.0" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.1" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
@@ -174,10 +174,18 @@ test("wallet commands use only a named OS keychain and never start a faucet or n
     asset: "USDC.e",
     assetAddress: "0x20C000000000000000000000b9537d11c60E8b50",
     minimumFundingAmount: "10000",
+    maximumNetworkFee: {
+      amount: "10000",
+      asset: "USDC.e",
+      display: "0.01 USDC.e",
+      separateFromMaxAmount: true
+    },
     nextStep:
-      "Fund this address on Tempo mainnet with enough USDC.e for the Pact requirement plus a " +
-      "Tempo transaction-fee reserve. --max-amount caps payment principal, not network fees. Then run: " +
-      "pact fund <pactId> --payer mppx --account buyer --max-amount 0.01"
+      "Before funding, run pact get <pactId>, derive the exact deposit-plus-bond principal, and " +
+      "obtain approval for that cap. Fund this address on Tempo mainnet with that principal plus a " +
+      "transaction-fee reserve. --max-amount caps principal; the separately enforced network-fee " +
+      "ceiling is 0.01 USDC.e. Then run: " +
+      "pact fund <pactId> --payer mppx --account buyer --max-amount <approved-principal-cap-USD>"
   });
   assert.equal(generated, 1);
   assert.equal(networkCalls, 0);
