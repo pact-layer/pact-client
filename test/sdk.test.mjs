@@ -35,6 +35,104 @@ test("download surfaces a non-success response", async (t) => {
   await assert.rejects(() => client.download("/dl/expired"), /download 403/);
 });
 
+test("prepareFund creates one action-bound request with an encoded Pact ID", async () => {
+  const client = new PactClient({ server: "https://api.pact.sh/", privkey: "01".repeat(32) });
+  client.getPact = async () => ({ pact: { id: "p/a", stateNonce: 13 } });
+
+  const request = await client.prepareFund("p/a", {
+    railAddress: "0x1111111111111111111111111111111111111111"
+  });
+
+  assert.equal(request.url, "https://api.pact.sh/pacts/p%2Fa/fund");
+  assert.equal(request.method, "POST");
+  assert.deepEqual(request.headers, { "content-type": "application/json" });
+  assert.equal(request.body.action, "pacts.fund");
+  assert.equal(request.body.pactId, "p/a");
+  assert.equal(request.body.stateNonce, 13);
+  assert.deepEqual(request.body.call, { railAddress: "0x1111111111111111111111111111111111111111" });
+  const { sig, ...unsigned } = request.body;
+  assert.equal(sig, signCanonical(unsigned, "01".repeat(32)));
+});
+
+test("fund reuses the exact SignedCall for a standard paid retry and never auto-pays again", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const posts = [];
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (target, options = {}) => {
+    const url = new URL(String(target));
+    if ((options.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ pact: { id: "p_paid", stateNonce: 7 } }), {
+        headers: { "content-type": "application/json" }
+      });
+    }
+    posts.push({
+      url: url.href,
+      body: String(options.body),
+      headers: new Headers(options.headers)
+    });
+    if (posts.length === 1) {
+      return new Response(JSON.stringify({ requirement: { rail: "mpp", railData: { protocol: "mpp" } } }), {
+        status: 402,
+        headers: {
+          "content-type": "application/json",
+          "www-authenticate": "Payment challenge"
+        }
+      });
+    }
+    return new Response(JSON.stringify({ error: "concurrent transition (CAS)" }), {
+      status: 409,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const client = new PactClient({ server: "https://api.pact.sh", privkey: "01".repeat(32) });
+  let callbackRequest;
+  const result = await client.fund("p_paid", {
+    railAddress: "0x1111111111111111111111111111111111111111",
+    pay: async (requirement, request) => {
+      assert.equal(requirement.rail, "mpp");
+      callbackRequest = request;
+      return { headers: { authorization: "Payment signed-credential" } };
+    }
+  });
+
+  assert.equal(result.status, 409);
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].body, posts[1].body);
+  assert.equal(posts[1].headers.get("authorization"), "Payment signed-credential");
+  assert.equal(callbackRequest.url, "https://api.pact.sh/pacts/p_paid/fund");
+  assert.equal(callbackRequest.method, "POST");
+  assert.equal(callbackRequest.challengeHeaders["www-authenticate"], "Payment challenge");
+  assert.deepEqual(callbackRequest.body, JSON.parse(posts[0].body));
+});
+
+test("fund returns a real-rail 402 without fabricating a legacy proof", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let postCount = 0;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (_target, options = {}) => {
+    if ((options.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify({ pact: { id: "p_mpp", stateNonce: 2 } }));
+    }
+    postCount += 1;
+    return new Response(JSON.stringify({ requirement: { rail: "mpp" } }), {
+      status: 402,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const client = new PactClient({ server: "https://api.pact.sh", privkey: "01".repeat(32) });
+  const result = await client.fund("p_mpp", {
+    railAddress: "0x1111111111111111111111111111111111111111"
+  });
+  assert.equal(result.status, 402);
+  assert.equal(postCount, 1);
+});
+
 test("fund replays a supplied crash-recovery proof directly and byte-identically across CAS retry", async (t) => {
   const originalFetch = globalThis.fetch;
   const requests = [];

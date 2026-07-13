@@ -8,14 +8,14 @@ Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LL
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.2.4
+npm install --global github:learners-superpumped/pact-agent#v0.3.0
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.2.4
+npm install github:learners-superpumped/pact-agent#v0.3.0
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
@@ -44,7 +44,11 @@ pact create --file spec.json        # → pactId
 
 # 5. Deposit = commitment (mock proof is automatic)
 pact fund p_XXXX
-# Real rail: enter one JSON proof at the hidden stdin prompt.
+# Real MPP rail: use one named mppx OS-keychain account.
+pact wallet mppx create --account buyer
+# Fund it with the Pact requirement plus a Tempo transaction-fee reserve.
+pact fund p_XXXX --payer mppx --account buyer --max-amount 0.01
+# Legacy recovery only: enter an operator-provided JSON proof at the hidden stdin prompt.
 pact fund p_XXXX --proof-stdin
 
 # 6. Watch progress / review the deliverable / approve
@@ -127,3 +131,90 @@ Identity-authorized pact mutations use a route-bound SignedCall envelope
 as another. Deadline `poke` is public and unsigned; evaluator verdicts, blob
 uploads, and offers use their documented signed formats. The server never sees
 your key.
+
+## Real payments: x402 and MPP
+
+Pact's ed25519 identity is separate from its payment wallet. A real-rail fund
+call binds the active EVM payer address inside the action-bound SignedCall, then
+reuses those exact signed bytes for the initial 402 request and the paid retry.
+
+```js
+const funded = await me.fund(pact.id, {
+  railAddress: payerAddress,
+  pay: async (_requirement, challenge) => {
+    // Wallet-specific pseudocode: return only standard retry headers for the
+    // exact challenge.url, challenge.method, and challenge.body.
+    return { headers: await paymentWallet.headersFor(challenge) };
+  }
+});
+```
+
+`headersFor` is illustrative and is not a Pact SDK method. A production wallet
+adapter must pin the amount, escrow recipient, network, asset, URL, method, and
+immutable SignedCall body before signing. After a standard payment credential
+has been submitted, the SDK returns the response without generating another
+credential automatically. If the outcome is uncertain, reconcile it before
+retrying.
+
+| Pact rail | Network and asset | Challenge → paid retry → receipt |
+|---|---|---|
+| `x402` | Base Sepolia USDC, current Pact compatibility path | 402 requirement → `X-PAYMENT` transaction proof |
+| `mpp` | Tempo mainnet USDC.e, `tempo/charge` pull | `WWW-Authenticate: Payment` → `Authorization: Payment` → `Payment-Receipt` |
+
+`X-PAYMENT` remains the current Pact x402 compatibility path and is also used
+for the local mock rail. It is not the MPP wire format.
+
+### Wallet setup
+
+The CLI ships exact, integrity-locked mppx and viem versions in
+`npm-shrinkwrap.json` and resolves the pinned mppx keychain module only from
+this package's own dependency tree. It does not use `npx` to download
+wallet-capable code at runtime.
+
+```bash
+# Create a local EVM account in the operating-system keychain. This command
+# makes no network request and does not fund the account.
+pact wallet mppx create --account buyer
+pact wallet mppx view --account buyer
+pact wallet mppx list
+```
+
+`create` returns JSON with `name`, `address`, `keyStorage`, Tempo mainnet
+`network`, USDC.e `asset` and `assetAddress`, `minimumFundingAmount`, and the
+next capped `pact fund` command template. Fund the returned address with enough
+mainnet USDC.e for the Pact requirement plus a Tempo transaction-fee reserve.
+`list` returns account names only; use `view --account <name>` to resolve one
+address. Pact never exports the private key and does not fund the account for
+you.
+
+Only mppx MPP payment is enabled for an integrated `pact fund` real-payment
+flow in this package.
+
+```bash
+pact fund p_XXXX \
+  --payer mppx \
+  --account buyer \
+  --max-amount 0.01
+```
+
+The command accepts only an MPP/Tempo pact. For x402, use the operator-provided
+transaction proof through `--proof-stdin`. The mppx path checks the ledger amount
+against `--max-amount` before loading the signer, then verifies the 402
+amount, escrow recipient, network, token, HTTPS route, HTTP method, and
+SHA-256-bound SignedCall before signing. MPP accepts only Tempo chain 4217,
+USDC.e, `tempo/charge`, and pull mode. Production Pact currently requires at
+least 10,000 atomic units (0.01 USDC.e) for MPP funding. `--max-amount` caps the
+requested payment principal; it does not cap or fund Tempo network fees.
+
+Pact rejects non-empty `MPPX_PRIVATE_KEY` and `X402_PRIVATE_KEY` variables on
+this path because mppx's resolver otherwise gives an environment key priority.
+Use a named OS-keychain account. The Pact wrapper exposes only mppx account
+create, list, and view; it does not expose export, delete, fund, or spend
+commands.
+
+The exact payment package versions are `mppx@0.8.6` and `viem@2.55.1`.
+
+There is no hosted Pact MPP gateway or MPP API key. The Pact server speaks MPP
+directly with mppx and settles against its Tempo escrow wallet. Check the
+selected server's `/health` response before creating a real-rail pact; the
+advertised `rails` array is the availability source of truth.
