@@ -93,16 +93,143 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.2.4 and the documented default server", async () => {
+test("version and init use 0.3.0 and the documented default server", async () => {
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.4" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.0" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
   assert.equal(JSON.parse(init.stdout).server, "https://api.pact.sh");
   assert.equal(JSON.parse(readFileSync(join(home, "agent.json"), "utf8")).server, "https://api.pact.sh");
+});
+
+test("wallet-capable dependencies are exact and integrity-locked for the published package", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("../npm-shrinkwrap.json", import.meta.url), "utf8"));
+  const cliSource = readFileSync(new URL("../bin/pact.js", import.meta.url), "utf8");
+  const payerSource = readFileSync(new URL("../lib/mppx-payer.js", import.meta.url), "utf8");
+
+  assert.ok(manifest.files.includes("npm-shrinkwrap.json"));
+  for (const [name, version] of Object.entries({ mppx: "0.8.6", viem: "2.55.1" })) {
+    assert.equal(manifest.dependencies[name], version);
+    const installed = lock.packages[`node_modules/${name}`];
+    assert.equal(installed.version, version);
+    assert.match(installed.integrity, /^sha512-/);
+  }
+  assert.doesNotMatch(cliSource, /spawn\(["']npx["']/);
+  assert.doesNotMatch(cliSource, /wallet\.json|--signatures [<'"]/);
+  assert.doesNotMatch(cliSource, /console\.(?:log|error)\([^\n]*privateKey/);
+  assert.doesNotMatch(payerSource, /readFile|wallet\.json|privateKeyToAccount|AGENTCASH_HOME/);
+});
+
+test("wallet commands use only a named OS keychain and never start a faucet or network request", async () => {
+  const { loadMppxKeychainRuntime, runWalletTool, verifyWalletManifest } = await import("../bin/pact.js");
+  assert.throws(
+    () => verifyWalletManifest("mppx", { name: "mppx", version: "0.8.7", bin: { mppx: "./dist/bin.js" } }),
+    /dependency mismatch/
+  );
+  const installedRuntime = await loadMppxKeychainRuntime();
+  assert.equal(typeof installedRuntime.createKeychain, "function");
+  assert.equal(typeof installedRuntime.generatePrivateKey, "function");
+  assert.equal(typeof installedRuntime.privateKeyToAccount, "function");
+
+  const stored = new Map();
+  let generated = 0;
+  let keyReads = 0;
+  let networkCalls = 0;
+  const runtime = {
+    createKeychain(name = "main") {
+      return {
+        async get() {
+          keyReads += 1;
+          return stored.get(name);
+        },
+        async list() { return [...stored.keys()]; },
+        async set(value) { stored.set(name, value); }
+      };
+    },
+    generatePrivateKey() {
+      generated += 1;
+      return `key-${generated}`;
+    },
+    privateKeyToAccount(key) {
+      const suffix = key === "key-1" ? "1" : "2";
+      return { address: `0x${suffix.repeat(40)}` };
+    },
+    async fetch() {
+      networkCalls += 1;
+      throw new Error("wallet creation must not use the network");
+    }
+  };
+
+  const created = await runWalletTool("mppx", "create", ["--account", "buyer"], runtime);
+  assert.deepEqual(created, {
+    name: "buyer",
+    address: `0x${"1".repeat(40)}`,
+    keyStorage: "os-keychain",
+    network: "eip155:4217",
+    networkName: "Tempo mainnet",
+    asset: "USDC.e",
+    assetAddress: "0x20C000000000000000000000b9537d11c60E8b50",
+    minimumFundingAmount: "10000",
+    nextStep:
+      "Fund this address on Tempo mainnet with enough USDC.e for the Pact requirement plus a " +
+      "Tempo transaction-fee reserve. --max-amount caps payment principal, not network fees. Then run: " +
+      "pact fund <pactId> --payer mppx --account buyer --max-amount 0.01"
+  });
+  assert.equal(generated, 1);
+  assert.equal(networkCalls, 0);
+  assert.doesNotMatch(JSON.stringify(created), /testnet|faucet/i);
+
+  const viewed = await runWalletTool("mppx", "view", ["--account", "buyer"], runtime);
+  assert.equal(viewed.address, created.address);
+  const keyReadsBeforeList = keyReads;
+  assert.deepEqual(await runWalletTool("mppx", "list", [], runtime), {
+    accounts: ["buyer"],
+    keyStorage: "os-keychain"
+  });
+  assert.equal(keyReads, keyReadsBeforeList);
+  await assert.rejects(runWalletTool("mppx", "create", ["--account", "buyer"], runtime), /already exists/);
+  await assert.rejects(runWalletTool("mppx", "export", ["--account", "buyer"], runtime), /usage: pact wallet/);
+  await assert.rejects(runWalletTool("mppx", "create", ["--network", "testnet"], runtime), /usage: pact wallet/);
+});
+
+test("mppx funding is MPP-only and rejects raw environment keys before Pact or wallet access", async () => {
+  const { paymentProtocol } = await import("../bin/pact.js");
+  assert.equal(paymentProtocol("mpp"), "mpp");
+  assert.throws(() => paymentProtocol("x402"), /X-PAYMENT proof/);
+  assert.throws(() => paymentProtocol("mpp", "x402"), /--protocol must be mpp/);
+
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const common = ["fund", "p_1", "--payer", "mppx", "--max-amount", "0.01"];
+  const mppxKey = await run(common, {
+    PACT_HOME: home,
+    MPPX_PRIVATE_KEY: `0x${"11".repeat(32)}`,
+    X402_PRIVATE_KEY: ""
+  });
+  assert.equal(mppxKey.status, 1);
+  assert.match(mppxKey.stderr, /MPPX_PRIVATE_KEY is disabled/);
+  assert.doesNotMatch(mppxKey.stderr, /no agent config/);
+
+  const x402Key = await run(common, {
+    PACT_HOME: home,
+    MPPX_PRIVATE_KEY: "",
+    X402_PRIVATE_KEY: `0x${"22".repeat(32)}`
+  });
+  assert.equal(x402Key.status, 1);
+  assert.match(x402Key.stderr, /X402_PRIVATE_KEY is disabled/);
+  assert.doesNotMatch(x402Key.stderr, /no agent config/);
+
+  const missingAccount = await run(common, {
+    PACT_HOME: home,
+    MPPX_PRIVATE_KEY: "",
+    X402_PRIVATE_KEY: ""
+  });
+  assert.equal(missingAccount.status, 1);
+  assert.match(missingAccount.stderr, /--account is required with --payer mppx/);
+  assert.doesNotMatch(missingAccount.stderr, /no agent config/);
 });
 
 test("init --server persists the selected server and PACT_SERVER overrides it", async (t) => {
@@ -365,6 +492,8 @@ test("help and representative success and failure output are English-only", asyn
     assert.doesNotMatch(result.stdout + result.stderr, /[가-힣]/);
   }
   assert.match(outputs[0].stderr, /--proof-stdin/);
+  assert.match(outputs[0].stderr, /--payer mppx/);
+  assert.match(outputs[0].stderr, /--max-amount/);
   assert.match(outputs[0].stderr, /pact cancel/);
   assert.match(outputs[0].stderr, /--signatures-stdin/);
   assert.match(outputs[0].stderr, /TTY input is hidden/);
