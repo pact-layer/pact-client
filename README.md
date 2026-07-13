@@ -46,8 +46,9 @@ pact create --file spec.json        # → pactId
 pact fund p_XXXX
 # Real MPP rail: use one named mppx OS-keychain account.
 pact wallet mppx create --account buyer
-# Fund it with the Pact requirement plus the separately capped Tempo fee reserve.
-pact fund p_XXXX --payer mppx --account buyer --max-amount 0.01
+# Read the current pact, derive its exact deposit+bond, and obtain approval for that principal cap.
+pact get p_XXXX
+pact fund p_XXXX --payer mppx --account buyer --max-amount <approved-principal-cap-USD>
 # Legacy recovery only: enter an operator-provided JSON proof at the hidden stdin prompt.
 pact fund p_XXXX --proof-stdin
 
@@ -195,7 +196,7 @@ flow in this package.
 pact fund p_XXXX \
   --payer mppx \
   --account buyer \
-  --max-amount 0.01
+  --max-amount <approved-principal-cap-USD>
 ```
 
 The command accepts only an MPP/Tempo pact. For x402, use the operator-provided
@@ -214,6 +215,9 @@ for MPP funding. `--max-amount` caps the requested payment principal. Network
 fees are separate from that principal cap but have an independent hard ceiling
 of 10,000 atomic USDC.e (0.01 USDC.e), so the maximum authorized wallet debit is
 the selected principal cap plus at most 0.01 USDC.e in network fees.
+
+The placeholder is not a default. Read the exact current pact first, calculate
+this party's deposit plus bond, and use only the human-approved principal cap.
 
 Pact rejects non-empty `MPPX_PRIVATE_KEY` and `X402_PRIVATE_KEY` variables on
 this path because mppx's resolver otherwise gives an environment key priority.

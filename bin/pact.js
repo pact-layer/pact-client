@@ -239,10 +239,11 @@ function mppxAccountOutput(name, address, includeNextStep = false) {
     ? {
         ...output,
         nextStep:
-          `Fund this address on Tempo mainnet with enough USDC.e for the Pact requirement plus a ` +
-          `Tempo transaction-fee reserve. --max-amount caps payment principal; the separately enforced ` +
-          `network-fee ceiling is ${MPP_MAX_TOTAL_FEE_USDCE} USDC.e. Then run: ` +
-          `pact fund <pactId> --payer mppx --account ${name} --max-amount 0.01`
+          `Before funding, run pact get <pactId>, derive the exact deposit-plus-bond principal, and ` +
+          `obtain approval for that cap. Fund this address on Tempo mainnet with that principal plus a ` +
+          `transaction-fee reserve. --max-amount caps principal; the separately enforced network-fee ` +
+          `ceiling is ${MPP_MAX_TOTAL_FEE_USDCE} USDC.e. Then run: ` +
+          `pact fund <pactId> --payer mppx --account ${name} --max-amount <approved-principal-cap-USD>`
       }
     : output;
 }

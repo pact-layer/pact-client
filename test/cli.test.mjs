@@ -181,10 +181,11 @@ test("wallet commands use only a named OS keychain and never start a faucet or n
       separateFromMaxAmount: true
     },
     nextStep:
-      "Fund this address on Tempo mainnet with enough USDC.e for the Pact requirement plus a " +
-      "Tempo transaction-fee reserve. --max-amount caps payment principal; the separately enforced " +
-      "network-fee ceiling is 0.01 USDC.e. Then run: " +
-      "pact fund <pactId> --payer mppx --account buyer --max-amount 0.01"
+      "Before funding, run pact get <pactId>, derive the exact deposit-plus-bond principal, and " +
+      "obtain approval for that cap. Fund this address on Tempo mainnet with that principal plus a " +
+      "transaction-fee reserve. --max-amount caps principal; the separately enforced network-fee " +
+      "ceiling is 0.01 USDC.e. Then run: " +
+      "pact fund <pactId> --payer mppx --account buyer --max-amount <approved-principal-cap-USD>"
   });
   assert.equal(generated, 1);
   assert.equal(networkCalls, 0);
