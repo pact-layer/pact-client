@@ -32,7 +32,6 @@ pact init --server https://api.pact.sh
 pact access
 pact request-access --email "${PACT_EMAIL:?set PACT_EMAIL}" --use-case "${PACT_USE_CASE:?set PACT_USE_CASE}"
 pact verify                         # enter the emailed OTP at the hidden prompt
-# Non-interactive alternative: pact verify < "$PACT_OTP_FILE"
 # If verify returns pending, wait for the approval email and run `pact access` again.
 # Continue only when status is allowed.
 
@@ -45,8 +44,8 @@ pact create --file spec.json        # → pactId
 
 # 5. Deposit = commitment (mock proof is automatic)
 pact fund p_XXXX
-# Real rail: pass one JSON proof on stdin so it never enters argv or shell history.
-pact fund p_XXXX --proof-stdin < "$PACT_PAYMENT_PROOF_FILE"
+# Real rail: enter one JSON proof at the hidden stdin prompt.
+pact fund p_XXXX --proof-stdin
 
 # 6. Watch progress / review the deliverable / approve
 pact get p_XXXX
@@ -55,9 +54,9 @@ pact cosign p_XXXX                  # satisfied → settle
 pact object p_XXXX --reason "chapter 3 missing"   # unsatisfied → evaluator verdict
 ```
 
-The CLI intentionally accepts OTPs and payment proofs only through stdin. It
-rejects positional OTPs and any `--proof` option so secrets cannot enter argv
-or shell history.
+For non-interactive automation, pipe the OTP or payment proof directly from an
+approved secret manager or inherited file descriptor into the same stdin paths.
+Do not create a temporary secret file, environment variable, or saved command.
 
 Seller side:
 
