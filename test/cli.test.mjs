@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { readSecretInput } from "../lib/secure-input.js";
+import { signCanonical } from "../lib/sdk.js";
 
 const BIN = new URL("../bin/pact.js", import.meta.url).pathname;
 
@@ -68,6 +69,10 @@ async function mockServer({ denyWrites = false } = {}) {
       res.end(JSON.stringify({ error: "access_required" }));
       return;
     }
+    if (req.method === "POST" && req.url === "/pacts/p_test/cancel") {
+      res.end(JSON.stringify({ pact: { id: "p_test", state: "CANCELLED", stateNonce: 8 } }));
+      return;
+    }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "not found" }));
   });
@@ -80,11 +85,11 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.2.2 and the documented default server", async () => {
+test("version and init use 0.2.3 and the documented default server", async () => {
   const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.2" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.2.3" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
@@ -211,6 +216,97 @@ test("fund accepts proof JSON only on stdin and never reflects rejected argv sec
 
 });
 
+test("cancel prepares an action-bound signature and submits all signatures from stdin", async (t) => {
+  const api = await mockServer();
+  t.after(() => api.close());
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+  const conf = JSON.parse(readFileSync(join(home, "agent.json"), "utf8"));
+  const expiresAt = 2_000_000_000_000;
+
+  const prepared = await run(
+    ["cancel", "p_test", "--expires-at", String(expiresAt)],
+    { PACT_HOME: home }
+  );
+  assert.equal(prepared.status, 0);
+  const preparation = JSON.parse(prepared.stdout);
+  assert.equal(preparation.pactId, "p_test");
+  assert.equal(preparation.stateNonce, 7);
+  assert.equal(preparation.expiresAt, expiresAt);
+  assert.deepEqual(preparation.signature, {
+    signer: conf.partyId,
+    sig: signCanonical(
+      { action: "cancel", pactId: "p_test", stateNonce: 7, expiresAt },
+      conf.privkey
+    )
+  });
+  assert.match(preparation.nextStep, /same stateNonce and expiresAt/);
+  assert.equal(api.requests.filter((request) => request.url === "/pacts/p_test/cancel").length, 0);
+
+  const other = { signer: "ed25519:counterparty", sig: "ab", ignored: "not forwarded" };
+  const submitted = await run(
+    ["cancel", "p_test", "--expires-at", String(expiresAt), "--signatures-stdin"],
+    { PACT_HOME: home },
+    JSON.stringify([other])
+  );
+  assert.equal(submitted.status, 0);
+  assert.deepEqual(JSON.parse(submitted.stdout), {
+    pact: { id: "p_test", state: "CANCELLED", stateNonce: 8 }
+  });
+  const request = api.requests.find(
+    (entry) => entry.method === "POST" && entry.url === "/pacts/p_test/cancel"
+  );
+  assert.ok(request);
+  assert.equal(request.body.action, "pacts.cancel");
+  assert.equal(request.body.pactId, "p_test");
+  assert.equal(request.body.stateNonce, 7);
+  assert.equal(request.body.call.expiresAt, expiresAt);
+  assert.deepEqual(request.body.call.sigs, [
+    { signer: other.signer, sig: other.sig },
+    preparation.signature
+  ]);
+});
+
+test("cancel rejects argv signatures and invalid stdin without reflecting input", async (t) => {
+  const api = await mockServer();
+  t.after(() => api.close());
+  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+
+  for (const argv of [
+    ["cancel", "p_test", "--expires-at", "2000000000000", "--signatures", "argv-sensitive"],
+    ["cancel", "p_test", "--expires-at", "2000000000000", "--signatures=inline-sensitive"]
+  ]) {
+    const rejected = await run(argv, { PACT_HOME: home });
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /usage: pact cancel/);
+    assert.doesNotMatch(rejected.stdout + rejected.stderr, /argv-sensitive|inline-sensitive/);
+  }
+
+  const empty = await run(
+    ["cancel", "p_test", "--expires-at", "2000000000000", "--signatures-stdin"],
+    { PACT_HOME: home }
+  );
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /cancellation signatures JSON is required on stdin/);
+
+  const invalid = await run(
+    ["cancel", "p_test", "--expires-at", "2000000000000", "--signatures-stdin"],
+    { PACT_HOME: home },
+    "stdin-sensitive-not-json\n"
+  );
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /invalid cancellation signatures JSON on stdin/);
+  assert.doesNotMatch(invalid.stdout + invalid.stderr, /stdin-sensitive-not-json/);
+
+  const badExpiry = await run(
+    ["cancel", "p_test", "--expires-at", "not-a-time"],
+    { PACT_HOME: home }
+  );
+  assert.equal(badExpiry.status, 1);
+  assert.match(badExpiry.stderr, /usage: pact cancel/);
+});
+
 test("every raw non-success write response exits non-zero", async (t) => {
   const api = await mockServer({ denyWrites: true });
   t.after(() => api.close());
@@ -237,6 +333,14 @@ test("every raw non-success write response exits non-zero", async (t) => {
     assert.equal(result.status, 1, `${args.join(" ")} must exit 1: ${result.stderr}`);
     assert.deepEqual(JSON.parse(result.stdout), { error: "access_required" });
   }
+
+  const cancel = await run(
+    ["cancel", "p_test", "--expires-at", "2000000000000", "--signatures-stdin"],
+    { PACT_HOME: home },
+    "[]\n"
+  );
+  assert.equal(cancel.status, 1);
+  assert.deepEqual(JSON.parse(cancel.stdout), { error: "access_required" });
 });
 
 test("help and representative success and failure output are English-only", async () => {
@@ -253,6 +357,8 @@ test("help and representative success and failure output are English-only", asyn
     assert.doesNotMatch(result.stdout + result.stderr, /[가-힣]/);
   }
   assert.match(outputs[0].stderr, /--proof-stdin/);
+  assert.match(outputs[0].stderr, /pact cancel/);
+  assert.match(outputs[0].stderr, /--signatures-stdin/);
   assert.match(outputs[0].stderr, /TTY input is hidden/);
   assert.doesNotMatch(outputs[0].stderr, /legacy|pact verify <otp>|--proof '<j>'/);
 });

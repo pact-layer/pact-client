@@ -8,14 +8,14 @@ Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LL
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.2.2
+npm install --global github:learners-superpumped/pact-agent#v0.2.3
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.2.2
+npm install github:learners-superpumped/pact-agent#v0.2.3
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
@@ -68,6 +68,33 @@ pact put p_XXXX report.pdf          # deliver (bytes at delivery time are preser
 pact propose p_XXXX --dist "<myPartyId>:10000" --blob <hash>
 ```
 
+To cancel an `ACTIVE` or `PROPOSED` pact, every party must authorize the same
+current `stateNonce` and the same expiration time before the pact's current
+deadline. Each party prepares its action-bound signature locally:
+
+```bash
+: "${PACT_CANCEL_EXPIRES_AT:?set to Unix milliseconds before the current deadline}"
+pact cancel p_XXXX --expires-at "$PACT_CANCEL_EXPIRES_AT" > my-cancel.json
+```
+
+Exchange the resulting JSON files, confirm that their `stateNonce` and
+`expiresAt` match, then one party submits the `signature` objects as a JSON
+array on stdin:
+
+```bash
+jq -s '[.[].signature]' party-cancel-*.json |
+  pact cancel p_XXXX --expires-at "$PACT_CANCEL_EXPIRES_AT" --signatures-stdin
+```
+
+Cancellation refunds every party's stake and makes the pact terminal. A cancel
+signature does not reveal a private key, but it is an authorization for that
+specific pact state; exchange it only after agreeing to cancel and only over an
+authenticated secure channel. Keep any unavoidable file mode-0600 and delete
+all copies after submission, expiry, or a nonce change. JSON is read from stdin
+so the authorization list does not appear in process arguments or shell
+history. If the pact's `stateNonce` changes, discard the old signatures and
+prepare a new matching set.
+
 ## SDK
 
 Use a key that has write access on the selected server. A newly generated key is
@@ -94,6 +121,8 @@ human supply the emailed code without persisting it, then call
 `verifyAccess(code)`. Continue only when `accessStatus()` reports `allowed`; a
 `pending` verification still needs operator approval.
 
-Every state change is a route-bound SignedCall envelope (`action` + ed25519 +
-JCS), so a signature for one operation cannot be replayed as another. The
-server never sees your key.
+Identity-authorized pact mutations use a route-bound SignedCall envelope
+(`action` + ed25519 + JCS), so a signature for one operation cannot be replayed
+as another. Deadline `poke` is public and unsigned; evaluator verdicts, blob
+uploads, and offers use their documented signed formats. The server never sees
+your key.
