@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { Challenge, PaymentRequest, Receipt } from "mppx";
+import { Challenge, PaymentRequest, Receipt, x402 } from "mppx";
 import { createClient, custom, encodeFunctionData } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { Chain } from "viem/tempo";
 import {
+  BASE_CHAIN_ID,
+  BASE_USDC,
   MPP_MAX_FEE_PER_GAS,
   MPP_MAX_GAS,
   MPP_MAX_PRIORITY_FEE_PER_GAS,
@@ -14,6 +19,10 @@ import {
   MPP_MIN_FUNDING_AMOUNT,
   TEMPO_CHAIN_ID,
   TEMPO_USDCE,
+  X402_MAX_TIMEOUT_SECONDS,
+  assertX402PaymentSignature,
+  assertX402Requirement,
+  assertX402SettlementReceipt,
   assertMppxChallenge,
   assertMppxKeychainOnly,
   assertMppxRequirement,
@@ -98,6 +107,83 @@ function requirement(overrides = {}) {
   };
 }
 
+const X402_ROUTE_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    _mppx_scope: { type: "string" },
+    digest: { type: "string" },
+    method: { type: "string" },
+    nonce: { type: "string" },
+    opaque: { type: "string" }
+  },
+  required: ["method"],
+  type: "object"
+};
+
+function x402Accepted(overrides = {}) {
+  return {
+    amount: "10000",
+    asset: BASE_USDC,
+    extra: { assetTransferMethod: "eip3009", name: "USD Coin", version: "2" },
+    maxTimeoutSeconds: X402_MAX_TIMEOUT_SECONDS,
+    network: `eip155:${BASE_CHAIN_ID}`,
+    payTo: RECIPIENT,
+    scheme: "exact",
+    ...overrides
+  };
+}
+
+function x402Extensions(scope, overrides = {}) {
+  return {
+    mppx: {
+      info: {
+        method: "POST",
+        _mppx_scope: scope,
+        opaque: PaymentRequest.serialize({ _mppx_scope: scope }),
+        ...(overrides.info ?? {})
+      },
+      schema: overrides.schema ?? X402_ROUTE_SCHEMA
+    },
+    ...(overrides.extraExtensions ?? {})
+  };
+}
+
+function x402PaymentRequired(scope, overrides = {}) {
+  return {
+    accepts: [overrides.accepted ?? x402Accepted()],
+    error: "Payment is required (Pact p_1 funding).",
+    extensions: overrides.extensions ?? x402Extensions(scope),
+    resource: overrides.resource ?? { url: "https://api.pact.sh/pacts/p_1/fund" },
+    x402Version: 2
+  };
+}
+
+function x402Requirement(overrides = {}) {
+  const railData = {
+    protocol: "x402",
+    version: 2,
+    scheme: "exact",
+    live: true,
+    network: `eip155:${BASE_CHAIN_ID}`,
+    asset: BASE_USDC,
+    assetSymbol: "USDC",
+    payTo: RECIPIENT,
+    amount: "10000",
+    facilitator: "https://facilitator.xpay.sh",
+    collectionGasSponsored: true,
+    payoutGasSponsored: false,
+    ...(overrides.railData ?? {})
+  };
+  return {
+    amount: { amount: "10000", asset: "USDC" },
+    asset: "USDC",
+    payTo: RECIPIENT,
+    rail: "x402",
+    ...overrides,
+    railData
+  };
+}
+
 test("validates Pact's nested MPP requirement wrapper and every native rail field", () => {
   const expected = { amount: 10000n, recipient: RECIPIENT };
   assert.deepEqual(assertMppxRequirement(requirement(), expected), requirement().railData);
@@ -119,6 +205,38 @@ test("validates Pact's nested MPP requirement wrapper and every native rail fiel
     requirement({ railData: { nativeGasTokenRequired: true } })
   ]) {
     assert.throws(() => assertMppxRequirement(mutated, expected));
+  }
+});
+
+test("pins x402 V2 to Base mainnet USDC, an HTTPS facilitator, and the immutable Pact route", () => {
+  const bodyText = JSON.stringify({ action: "pacts.fund", sig: "immutable" });
+  const scope = `pact-signed-call-sha256:${createHash("sha256").update(bodyText).digest("hex")}`;
+  const expected = {
+    amount: 10000n,
+    method: "POST",
+    recipient: RECIPIENT,
+    scope,
+    url: "https://api.pact.sh/pacts/p_1/fund"
+  };
+  const encoded = x402.Header.encodePaymentRequired(x402PaymentRequired(scope));
+  assert.deepEqual(
+    assertX402Requirement(x402Requirement(), encoded, expected),
+    x402PaymentRequired(scope)
+  );
+
+  for (const [wrapper, header] of [
+    [x402Requirement({ railData: { network: "eip155:84532" } }), encoded],
+    [x402Requirement({ railData: { facilitator: "http://facilitator.example" } }), encoded],
+    [x402Requirement({ railData: { collectionGasSponsored: false } }), encoded],
+    [x402Requirement(), x402.Header.encodePaymentRequired(x402PaymentRequired(scope, {
+      accepted: x402Accepted({ amount: "10001" })
+    }))],
+    [x402Requirement(), x402.Header.encodePaymentRequired(x402PaymentRequired("other-scope"))],
+    [x402Requirement(), x402.Header.encodePaymentRequired(x402PaymentRequired(scope, {
+      resource: { url: "https://evil.example/pacts/p_1/fund" }
+    }))]
+  ]) {
+    assert.throws(() => assertX402Requirement(wrapper, header, expected));
   }
 });
 
@@ -315,6 +433,38 @@ test("requires a Pact-bound Tempo Payment-Receipt before reporting success", () 
         ),
       /outcome uncertain.*not bound to this Pact/
     );
+  }
+});
+
+test("requires a successful Base PAYMENT-RESPONSE from the active x402 payer", () => {
+  const expected = {
+    amount: 10000n,
+    payer: PAYER.address,
+    url: "https://api.pact.sh/pacts/p_1/fund"
+  };
+  const response = (value) => new Response('{"ok":true}', {
+    status: 200,
+    headers: { "payment-response": x402.Header.encodePaymentResponse(value) }
+  });
+  assert.doesNotThrow(() => assertX402SettlementReceipt(response({
+    amount: "10000",
+    network: `eip155:${BASE_CHAIN_ID}`,
+    payer: PAYER.address,
+    success: true,
+    transaction: `0x${"98".repeat(32)}`
+  }), expected));
+  assert.throws(
+    () => assertX402SettlementReceipt(new Response('{"ok":true}', { status: 200 }), expected),
+    /outcome uncertain.*PAYMENT-RESPONSE/
+  );
+  for (const mutated of [
+    { network: "eip155:84532", payer: PAYER.address, success: true, transaction: `0x${"98".repeat(32)}` },
+    { network: `eip155:${BASE_CHAIN_ID}`, payer: RECIPIENT, success: true, transaction: `0x${"98".repeat(32)}` },
+    { network: `eip155:${BASE_CHAIN_ID}`, payer: PAYER.address, success: false, transaction: "" },
+    { network: `eip155:${BASE_CHAIN_ID}`, payer: PAYER.address, success: true, transaction: "not-a-hash" },
+    { amount: "10001", network: `eip155:${BASE_CHAIN_ID}`, payer: PAYER.address, success: true, transaction: `0x${"98".repeat(32)}` }
+  ]) {
+    assert.throws(() => assertX402SettlementReceipt(response(mutated), expected), /outcome uncertain/);
   }
 });
 
@@ -559,8 +709,336 @@ test("pins production and injected Tempo clients to mainnet USDC.e fees", async 
   await assert.rejects(pinnedTempoClientResolver(() => injected)({ chainId: 1 }), /chainId must be 4217/);
 });
 
+test("completes one x402 V2 Base payment through mppx with the exact SignedCall", async (t) => {
+  withCleanKeyEnvironment(t);
+  const pactHome = mkdtempSync(join(tmpdir(), "pact-payment-x402-"));
+  let signatures = 0;
+  const account = {
+    ...PAYER,
+    async signTypedData(...args) {
+      signatures += 1;
+      return PAYER.signTypedData(...args);
+    }
+  };
+  const body = {
+    action: "pacts.fund",
+    call: { railAddress: account.address },
+    issuedAt: 1,
+    pactId: "p_1",
+    signer: "ed25519:payer",
+    stateNonce: 1,
+    sig: "ab".repeat(64)
+  };
+  const bodyText = JSON.stringify(body);
+  const scope = `pact-signed-call-sha256:${createHash("sha256").update(bodyText).digest("hex")}`;
+  const paymentRequired = x402PaymentRequired(scope);
+  let submittedCredential;
+  let calls = 0;
+  const fetch = async (input, init) => {
+    calls += 1;
+    const request = new Request(input, init);
+    assert.equal(request.redirect, "error");
+    assert.equal(await request.clone().text(), bodyText);
+    const signature = request.headers.get("payment-signature");
+    if (!signature) {
+      return new Response(JSON.stringify({ requirement: x402Requirement() }), {
+        status: 402,
+        headers: {
+          "content-type": "application/json",
+          "payment-required": x402.Header.encodePaymentRequired(paymentRequired)
+        }
+      });
+    }
+    assert.equal(request.headers.has("authorization"), false);
+    submittedCredential = await assertX402PaymentSignature(signature, {
+      amount: 10000n,
+      method: "POST",
+      payer: account.address,
+      recipient: RECIPIENT,
+      scope,
+      url: "https://api.pact.sh/pacts/p_1/fund"
+    }, paymentRequired);
+    return new Response('{"pact":{"id":"p_1"}}', {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "payment-response": x402.Header.encodePaymentResponse({
+          amount: "10000",
+          network: `eip155:${BASE_CHAIN_ID}`,
+          payer: account.address,
+          success: true,
+          transaction: `0x${"99".repeat(32)}`
+        })
+      }
+    });
+  };
+
+  const result = await runMppxPayment(
+    {
+      url: "https://api.pact.sh/pacts/p_1/fund",
+      method: "POST",
+      body,
+      headers: { "content-type": "application/json" }
+    },
+    {
+      protocol: "x402",
+      maxAmount: "0.01",
+      expectedAmount: "10000",
+      expectedRecipient: RECIPIENT,
+      expectedPayer: account.address,
+      pactHome
+    },
+    { account, fetch }
+  );
+
+  assert.deepEqual(result, { status: 0, stdout: '{"pact":{"id":"p_1"}}\n', stderr: "" });
+  assert.equal(calls, 2);
+  assert.equal(signatures, 1);
+  assert.equal(submittedCredential.accepted.network, `eip155:${BASE_CHAIN_ID}`);
+  assert.equal(submittedCredential.accepted.asset, BASE_USDC);
+  assert.equal(submittedCredential.payload.authorization.value, "10000");
+  assert.equal(submittedCredential.payload.authorization.to.toLowerCase(), RECIPIENT.toLowerCase());
+  const journalPath = join(pactHome, "payment-attempts", readdirSync(join(pactHome, "payment-attempts"))[0]);
+  assert.equal(JSON.parse(readFileSync(journalPath, "utf8")).state, "settled");
+  assert.equal(statSync(join(pactHome, "payment-attempts")).mode & 0o777, 0o700);
+  assert.equal(statSync(journalPath).mode & 0o777, 0o600);
+});
+
+test("serializes concurrent funding and durably marks uncertain before the paid fetch", async (t) => {
+  withCleanKeyEnvironment(t);
+  const pactHome = mkdtempSync(join(tmpdir(), "pact-payment-lock-"));
+  let signatures = 0;
+  const account = {
+    ...PAYER,
+    async signTypedData(...args) {
+      signatures += 1;
+      return PAYER.signTypedData(...args);
+    }
+  };
+  const body = {
+    action: "pacts.fund",
+    call: { railAddress: account.address },
+    issuedAt: 2,
+    pactId: "p_lock",
+    signer: "ed25519:payer",
+    stateNonce: 1,
+    sig: "ab".repeat(64)
+  };
+  const bodyText = JSON.stringify(body);
+  const scope = `pact-signed-call-sha256:${createHash("sha256").update(bodyText).digest("hex")}`;
+  const paymentRequired = x402PaymentRequired(scope, {
+    resource: { url: "https://api.pact.sh/pacts/p_lock/fund" }
+  });
+  let allowProbe;
+  const probeGate = new Promise((resolve) => { allowProbe = resolve; });
+  let probeStarted;
+  const started = new Promise((resolve) => { probeStarted = resolve; });
+  let calls = 0;
+  let submittedCredential;
+  const fetch = async (input, init) => {
+    calls += 1;
+    const retry = new Request(input, init);
+    const credential = retry.headers.get("payment-signature");
+    if (!credential) {
+      probeStarted();
+      await probeGate;
+      return new Response(JSON.stringify({ requirement: x402Requirement() }), {
+        status: 402,
+        headers: {
+          "content-type": "application/json",
+          "payment-required": x402.Header.encodePaymentRequired(paymentRequired)
+        }
+      });
+    }
+    submittedCredential = credential;
+    const journalPath = join(
+      pactHome,
+      "payment-attempts",
+      readdirSync(join(pactHome, "payment-attempts"))[0]
+    );
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    assert.equal(journal.state, "submitted_uncertain");
+    assert.equal(journal.credentialHash, createHash("sha256").update(credential).digest("hex"));
+    assert.doesNotMatch(readFileSync(journalPath, "utf8"), new RegExp(credential.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    return new Response('{"pact":{"id":"p_lock"}}', {
+      status: 200,
+      headers: {
+        "payment-response": x402.Header.encodePaymentResponse({
+          amount: "10000",
+          network: `eip155:${BASE_CHAIN_ID}`,
+          payer: account.address,
+          success: true,
+          transaction: `0x${"98".repeat(32)}`
+        })
+      }
+    });
+  };
+  const request = {
+    body,
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    url: "https://api.pact.sh/pacts/p_lock/fund"
+  };
+  const options = {
+    expectedAmount: "10000",
+    expectedPayer: account.address,
+    expectedRecipient: RECIPIENT,
+    maxAmount: "0.01",
+    pactHome,
+    protocol: "x402"
+  };
+
+  const first = runMppxPayment(request, options, { account, fetch });
+  await started;
+  await assert.rejects(
+    runMppxPayment(request, options, { account, fetch }),
+    /already in progress/
+  );
+  allowProbe();
+  await first;
+  assert.equal(calls, 2);
+  assert.equal(signatures, 1);
+  assert.ok(submittedCredential);
+
+  await assert.rejects(
+    runMppxPayment(request, options, { account, fetch }),
+    /settled; do not retry/
+  );
+  assert.equal(calls, 2);
+  assert.equal(signatures, 1);
+});
+
+test("keeps a submitted credential fail-closed after a transport failure", async (t) => {
+  withCleanKeyEnvironment(t);
+  const pactHome = mkdtempSync(join(tmpdir(), "pact-payment-uncertain-"));
+  let signatures = 0;
+  const account = {
+    ...PAYER,
+    async signTypedData(...args) {
+      signatures += 1;
+      return PAYER.signTypedData(...args);
+    }
+  };
+  const body = {
+    action: "pacts.fund",
+    call: { railAddress: account.address },
+    issuedAt: 3,
+    pactId: "p_uncertain",
+    signer: "ed25519:payer",
+    stateNonce: 1,
+    sig: "ab".repeat(64)
+  };
+  const bodyText = JSON.stringify(body);
+  const scope = `pact-signed-call-sha256:${createHash("sha256").update(bodyText).digest("hex")}`;
+  const paymentRequired = x402PaymentRequired(scope, {
+    resource: { url: "https://api.pact.sh/pacts/p_uncertain/fund" }
+  });
+  let calls = 0;
+  let credential;
+  const fetch = async (input, init) => {
+    calls += 1;
+    const retry = new Request(input, init);
+    credential = retry.headers.get("payment-signature") ?? credential;
+    if (!retry.headers.get("payment-signature")) {
+      return new Response(JSON.stringify({ requirement: x402Requirement() }), {
+        status: 402,
+        headers: {
+          "content-type": "application/json",
+          "payment-required": x402.Header.encodePaymentRequired(paymentRequired)
+        }
+      });
+    }
+    throw new Error("simulated connection loss after submission");
+  };
+  const request = {
+    body,
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    url: "https://api.pact.sh/pacts/p_uncertain/fund"
+  };
+  const options = {
+    expectedAmount: "10000",
+    expectedPayer: account.address,
+    expectedRecipient: RECIPIENT,
+    maxAmount: "0.01",
+    pactHome,
+    protocol: "x402"
+  };
+
+  await assert.rejects(
+    runMppxPayment(request, options, { account, fetch }),
+    /payment outcome uncertain/
+  );
+  assert.equal(calls, 2);
+  assert.equal(signatures, 1);
+  const journalPath = join(pactHome, "payment-attempts", readdirSync(join(pactHome, "payment-attempts"))[0]);
+  const journalText = readFileSync(journalPath, "utf8");
+  assert.equal(JSON.parse(journalText).state, "submitted_uncertain");
+  assert.ok(credential);
+  assert.equal(journalText.includes(credential), false);
+
+  await assert.rejects(
+    runMppxPayment(request, options, { account, fetch }),
+    /submitted uncertain; do not retry/
+  );
+  assert.equal(calls, 2);
+  assert.equal(signatures, 1);
+});
+
+test("releases only a pre-credential probe failure so a later safe probe may run", async (t) => {
+  withCleanKeyEnvironment(t);
+  const pactHome = mkdtempSync(join(tmpdir(), "pact-payment-probe-"));
+  const body = {
+    action: "pacts.fund",
+    call: { railAddress: PAYER.address },
+    issuedAt: 4,
+    pactId: "p_probe",
+    signer: "ed25519:payer",
+    stateNonce: 1,
+    sig: "ab".repeat(64)
+  };
+  const request = {
+    body,
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    url: "https://api.pact.sh/pacts/p_probe/fund"
+  };
+  const options = {
+    expectedAmount: "10000",
+    expectedPayer: PAYER.address,
+    expectedRecipient: RECIPIENT,
+    maxAmount: "0.01",
+    pactHome,
+    protocol: "mpp"
+  };
+  let calls = 0;
+  await assert.rejects(
+    runMppxPayment(request, options, {
+      account: PAYER,
+      async fetch() {
+        calls += 1;
+        throw new Error("probe did not reach Pact");
+      }
+    }),
+    /probe did not reach Pact/
+  );
+  assert.deepEqual(readdirSync(join(pactHome, "payment-attempts")), []);
+
+  const result = await runMppxPayment(request, options, {
+    account: PAYER,
+    async fetch() {
+      calls += 1;
+      return new Response("Pact rejected the unsigned request", { status: 409 });
+    }
+  });
+  assert.equal(result.status, 1);
+  assert.equal(calls, 2);
+  assert.deepEqual(readdirSync(join(pactHome, "payment-attempts")), []);
+});
+
 test("completes one standard MPP 402 challenge and paid retry with the exact SignedCall", async (t) => {
   withCleanKeyEnvironment(t);
+  const pactHome = mkdtempSync(join(tmpdir(), "pact-payment-mpp-"));
   let signatures = 0;
   let preparedTransaction;
   let signedTransaction;
@@ -682,7 +1160,8 @@ test("completes one standard MPP 402 challenge and paid retry with the exact Sig
       maxAmount: "0.01",
       expectedAmount: "10000",
       expectedRecipient: RECIPIENT,
-      expectedPayer: account.address
+      expectedPayer: account.address,
+      pactHome
     },
     { account, fetch, getTempoClient: () => tempoClient }
   );
@@ -705,9 +1184,13 @@ test("completes one standard MPP 402 challenge and paid retry with the exact Sig
     })
   );
   assert.match(signedTransaction, /^0x76[0-9a-f]+$/i);
+  const journalPath = join(pactHome, "payment-attempts", readdirSync(join(pactHome, "payment-attempts"))[0]);
+  const journalText = readFileSync(journalPath, "utf8");
+  assert.equal(JSON.parse(journalText).state, "settled");
+  assert.equal(journalText.includes(signedTransaction), false);
 });
 
-test("fails caps, non-HTTPS routes, x402, and malformed SignedCalls before network or signing", async (t) => {
+test("fails caps, unknown protocols, non-HTTPS routes, and malformed SignedCalls before signing", async (t) => {
   withCleanKeyEnvironment(t);
   let signatures = 0;
   const account = {
@@ -754,8 +1237,8 @@ test("fails caps, non-HTTPS routes, x402, and malformed SignedCalls before netwo
     /exact HTTPS URL/
   );
   await assert.rejects(
-    runMppxPayment(request, { ...options, protocol: "x402" }, { account, fetch }),
-    /supports only the MPP rail/
+    runMppxPayment(request, { ...options, protocol: "other" }, { account, fetch }),
+    /protocol must be mpp or x402/
   );
   await assert.rejects(
     runMppxPayment({ ...request, body: { ...body, action: "pacts.withdraw" } }, options, { account, fetch }),

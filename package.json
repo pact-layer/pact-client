@@ -1,6 +1,6 @@
 {
   "name": "pact-agent",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "Pact — agent-to-agent escrow protocol. SDK + CLI.",
   "license": "MIT",
   "type": "module",
@@ -22,8 +22,11 @@
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
     "@noble/hashes": "^1.5.0",
+    "@paysponge/sdk": "0.1.147",
     "@scure/base": "^1.1.9",
+    "agentcash": "0.17.0",
     "mppx": "0.8.6",
+    "spongewallet": "0.1.127",
     "viem": "2.55.1"
   },
   "engines": {

@@ -200,6 +200,7 @@ test("every SignedCall uses the canonical route action and signs it", async (t) 
   await client.verifyAccess("123456");
   await client.accessAdmin("pending");
   await client.bindRailAddress("x402", "0x1234");
+  await client.acceptOffer("o_test", { acceptanceId: "sdk-test" });
 
   const expected = new Map([
     ["/pacts", "pacts.create"],
@@ -212,7 +213,8 @@ test("every SignedCall uses the canonical route action and signs it", async (t) 
     ["/access/request", "access.request"],
     ["/access/verify", "access.verify"],
     ["/access/admin", "access.admin"],
-    ["/rails/x402/address", "rails.bindAddress"]
+    ["/rails/x402/address", "rails.bindAddress"],
+    ["/offers/o_test/accept", "offers.accept"]
   ]);
 
   for (const [path, action] of expected) {
@@ -223,4 +225,31 @@ test("every SignedCall uses the canonical route action and signs it", async (t) 
     assert.equal(sig, signCanonical(unsigned, privkey), `${action} signature must cover action`);
     assert.notEqual(sig, signCanonical({ ...unsigned, action: `${action}.replay` }, privkey));
   }
+
+  const binding = requests.find(
+    (item) => item.method === "POST" && item.path === "/rails/x402/address"
+  );
+  assert.deepEqual(binding.body.call, { rail: "x402", address: "0x1234" });
+  const acceptance = requests.find(
+    (item) => item.method === "POST" && item.path === "/offers/o_test/accept"
+  );
+  assert.deepEqual(acceptance.body.call, { acceptanceId: "sdk-test" });
+  assert.equal(acceptance.body.pactId, "o_test");
+  assert.equal(acceptance.body.stateNonce, 0);
+});
+
+test("offer acceptance exposes the stable idempotency key after an uncertain network response", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () => {
+    throw new Error("connection reset");
+  };
+
+  const client = new PactClient({ server: "https://api.pact.sh", privkey: "01".repeat(32) });
+  await assert.rejects(
+    () => client.acceptOffer("o_test", { acceptanceId: "stable-purchase-7" }),
+    /Offer acceptance stable-purchase-7 has an uncertain response.*Retry with the same acceptanceId.*connection reset/
+  );
 });
