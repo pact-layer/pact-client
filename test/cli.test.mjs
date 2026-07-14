@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,6 +22,10 @@ import { signCanonical } from "../lib/sdk.js";
 
 const BIN = new URL("../bin/pact.js", import.meta.url).pathname;
 const README = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+function secureTempHome(prefix = "pact-cli-test-") {
+  return realpathSync(mkdtempSync(join(realpathSync(tmpdir()), prefix)));
+}
 
 test("cancellation docs create a private file included by the submit glob", () => {
   assert.match(README, /umask 077/);
@@ -77,6 +92,16 @@ async function mockServer({ denyWrites = false } = {}) {
       res.end(JSON.stringify({ error: "access_required" }));
       return;
     }
+    if (req.method === "POST" && /^\/rails\/[^/]+\/address$/.test(req.url ?? "")) {
+      const call = JSON.parse(raw).call;
+      res.end(JSON.stringify({ rail: call.rail, address: call.address }));
+      return;
+    }
+    if (req.method === "POST" && /^\/offers\/[^/]+\/accept$/.test(req.url ?? "")) {
+      const body = JSON.parse(raw);
+      res.end(JSON.stringify({ pact: { id: "p_offer", sourceOffer: { id: body.pactId } } }));
+      return;
+    }
     if (req.method === "POST" && req.url === "/pacts/p_test/cancel") {
       res.end(JSON.stringify({ pact: { id: "p_test", state: "CANCELLED", stateNonce: 8 } }));
       return;
@@ -93,16 +118,127 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.3.1 and the documented default server", async () => {
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+test("version and init use 0.3.3 and the documented default server", async () => {
+  const home = secureTempHome();
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.1" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.3" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
-  assert.equal(JSON.parse(init.stdout).server, "https://api.pact.sh");
-  assert.equal(JSON.parse(readFileSync(join(home, "agent.json"), "utf8")).server, "https://api.pact.sh");
+  const initialized = JSON.parse(init.stdout);
+  const configPath = join(home, "agent.json");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(initialized.server, "https://api.pact.sh");
+  assert.equal(config.server, "https://api.pact.sh");
+  assert.equal(statSync(home).mode & 0o777, 0o700);
+  assert.equal(statSync(configPath).mode & 0o777, 0o600);
+  assert.doesNotMatch(init.stdout + init.stderr, new RegExp(config.privkey));
+});
+
+test("identity reads reject insecure files, directories, strict-schema violations, and invalid servers", async () => {
+  const modeHome = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: modeHome })).status, 0);
+  const modePath = join(modeHome, "agent.json");
+  const modeConfig = JSON.parse(readFileSync(modePath, "utf8"));
+  chmodSync(modePath, 0o644);
+  const publicFile = await run(["whoami"], { PACT_HOME: modeHome });
+  assert.equal(publicFile.status, 1);
+  assert.match(publicFile.stderr, /mode 0600/);
+  assert.doesNotMatch(publicFile.stdout + publicFile.stderr, new RegExp(modeConfig.privkey));
+
+  const directoryHome = secureTempHome();
+  chmodSync(directoryHome, 0o755);
+  const publicDirectory = await run(["init"], { PACT_HOME: directoryHome });
+  assert.equal(publicDirectory.status, 1);
+  assert.match(publicDirectory.stderr, /mode 0700/);
+  assert.equal(existsSync(join(directoryHome, "agent.json")), false);
+
+  const mismatchHome = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: mismatchHome })).status, 0);
+  const mismatchPath = join(mismatchHome, "agent.json");
+  const mismatch = JSON.parse(readFileSync(mismatchPath, "utf8"));
+  mismatch.partyId = "ed25519:not-the-derived-party";
+  writeFileSync(mismatchPath, `${JSON.stringify(mismatch)}\n`);
+  const mismatchedParty = await run(["whoami"], { PACT_HOME: mismatchHome });
+  assert.equal(mismatchedParty.status, 1);
+  assert.match(mismatchedParty.stderr, /partyId does not match/);
+  assert.doesNotMatch(mismatchedParty.stdout + mismatchedParty.stderr, new RegExp(mismatch.privkey));
+
+  const strictHome = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: strictHome })).status, 0);
+  const strictPath = join(strictHome, "agent.json");
+  const strict = JSON.parse(readFileSync(strictPath, "utf8"));
+  writeFileSync(strictPath, `${JSON.stringify({ ...strict, unexpected: true })}\n`);
+  const extraField = await run(["whoami"], { PACT_HOME: strictHome });
+  assert.equal(extraField.status, 1);
+  assert.match(extraField.stderr, /must contain only/);
+  assert.doesNotMatch(extraField.stdout + extraField.stderr, new RegExp(strict.privkey));
+
+  const invalidServerHome = secureTempHome();
+  const invalidServer = await run(["init", "--server", "file:///tmp/pact.sock"], {
+    PACT_HOME: invalidServerHome
+  });
+  assert.equal(invalidServer.status, 1);
+  assert.match(invalidServer.stderr, /http\(s\) origin URL/);
+  assert.equal(existsSync(join(invalidServerHome, "agent.json")), false);
+});
+
+test("identity reads reject oversized configs and a config changed during the open read", async () => {
+  const oversizedHome = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: oversizedHome })).status, 0);
+  const oversizedPath = join(oversizedHome, "agent.json");
+  writeFileSync(oversizedPath, Buffer.alloc(16_385, 0x20));
+  const oversized = await run(["whoami"], { PACT_HOME: oversizedHome });
+  assert.equal(oversized.status, 1);
+  assert.match(oversized.stderr, /exceeds 16384 bytes/);
+
+  const racedHome = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: racedHome })).status, 0);
+  const racedPath = join(racedHome, "agent.json");
+  const original = readFileSync(racedPath);
+  const { loadIdentityConfig } = await import("../bin/pact.js");
+  assert.throws(
+    () =>
+      loadIdentityConfig(racedPath, {
+        afterOpen() {
+          writeFileSync(racedPath, Buffer.concat([original, Buffer.from(" ")]));
+        }
+      }),
+    /changed during secure read/
+  );
+});
+
+test("identity paths reject final and ancestor symlinks, including init --force", async () => {
+  const finalHome = secureTempHome();
+  const targetHome = secureTempHome("pact-cli-target-");
+  assert.equal((await run(["init"], { PACT_HOME: targetHome })).status, 0);
+  const targetPath = join(targetHome, "agent.json");
+  const targetBefore = readFileSync(targetPath);
+  const finalPath = join(finalHome, "agent.json");
+  symlinkSync(targetPath, finalPath);
+
+  const finalRead = await run(["whoami"], { PACT_HOME: finalHome });
+  assert.equal(finalRead.status, 1);
+  assert.match(finalRead.stderr, /regular non-symlink file/);
+  const forced = await run(["init", "--force"], { PACT_HOME: finalHome });
+  assert.equal(forced.status, 1);
+  assert.match(forced.stderr, /refusing to replace.*symlink/);
+  assert.equal(lstatSync(finalPath).isSymbolicLink(), true);
+  assert.deepEqual(readFileSync(targetPath), targetBefore);
+
+  const ancestorBase = secureTempHome("pact-cli-ancestor-");
+  const realParent = join(ancestorBase, "real-parent");
+  const linkedParent = join(ancestorBase, "linked-parent");
+  const realHome = join(realParent, "identity-home");
+  const linkedHome = join(linkedParent, "identity-home");
+  mkdirSync(realParent, { mode: 0o700 });
+  mkdirSync(realHome, { mode: 0o700 });
+  assert.equal((await run(["init"], { PACT_HOME: realHome })).status, 0);
+  symlinkSync(realParent, linkedParent, "dir");
+  const ancestorRead = await run(["whoami"], { PACT_HOME: linkedHome });
+  assert.equal(ancestorRead.status, 1);
+  assert.match(ancestorRead.stderr, /ancestor must not be a symlink/);
 });
 
 test("wallet-capable dependencies are exact and integrity-locked for the published package", () => {
@@ -112,20 +248,62 @@ test("wallet-capable dependencies are exact and integrity-locked for the publish
   const payerSource = readFileSync(new URL("../lib/mppx-payer.js", import.meta.url), "utf8");
 
   assert.ok(manifest.files.includes("npm-shrinkwrap.json"));
-  for (const [name, version] of Object.entries({ mppx: "0.8.6", viem: "2.55.1" })) {
+  for (const [name, version] of Object.entries({
+    "@paysponge/sdk": "0.1.147",
+    agentcash: "0.17.0",
+    mppx: "0.8.6",
+    spongewallet: "0.1.127",
+    viem: "2.55.1"
+  })) {
     assert.equal(manifest.dependencies[name], version);
     const installed = lock.packages[`node_modules/${name}`];
     assert.equal(installed.version, version);
     assert.match(installed.integrity, /^sha512-/);
   }
   assert.doesNotMatch(cliSource, /spawn\(["']npx["']/);
-  assert.doesNotMatch(cliSource, /wallet\.json|--signatures [<'"]/);
+  assert.doesNotMatch(cliSource, /agentcash@\$\{|spongewallet@\$\{/);
+  assert.doesNotMatch(cliSource, /--signatures [<'"]/);
+  assert.match(cliSource, /join\(homedir\(\), "\.agentcash", "wallet\.json"\)/);
   assert.doesNotMatch(cliSource, /console\.(?:log|error)\([^\n]*privateKey/);
   assert.doesNotMatch(payerSource, /readFile|wallet\.json|privateKeyToAccount|AGENTCASH_HOME/);
 });
 
+test("AgentCash and PaySponge onboarding use only pinned local executables", async () => {
+  const { resolveWalletExecutable, runExternalWalletTool, verifyWalletManifest } =
+    await import("../bin/pact.js");
+  assert.throws(
+    () =>
+      verifyWalletManifest("agentcash", {
+        name: "agentcash",
+        version: "0.18.0",
+        bin: { agentcash: "dist/esm/index.js" }
+      }),
+    /dependency mismatch/
+  );
+  assert.match(resolveWalletExecutable("agentcash"), /agentcash\/dist\/esm\/index\.js$/);
+  assert.match(resolveWalletExecutable("paysponge"), /spongewallet\/bin\/spongewallet\.js$/);
+
+  const calls = [];
+  const fakeSpawn = (executable, args, options) => {
+    calls.push({ executable, args, options });
+    return { status: 0 };
+  };
+  assert.equal(runExternalWalletTool("agentcash", "balance", ["--format", "json"], fakeSpawn), 0);
+  assert.equal(runExternalWalletTool("paysponge", "init", [], fakeSpawn), 0);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.executable, process.execPath);
+    assert.equal(call.options.shell, false);
+    assert.equal(call.options.stdio, "inherit");
+    assert.doesNotMatch(call.args[0], /node_modules\/.bin/);
+  }
+  assert.throws(() => runExternalWalletTool("agentcash", "pay", [], fakeSpawn), /usage: pact wallet/);
+  assert.throws(() => runExternalWalletTool("paysponge", "export", [], fakeSpawn), /usage: pact wallet/);
+});
+
 test("wallet commands use only a named OS keychain and never start a faucet or network request", async () => {
-  const { loadMppxKeychainRuntime, runWalletTool, verifyWalletManifest } = await import("../bin/pact.js");
+  const { loadMppxKeychainRuntime, readPrivateAgentCashWallet, runWalletTool, verifyWalletManifest } =
+    await import("../bin/pact.js");
   assert.throws(
     () => verifyWalletManifest("mppx", { name: "mppx", version: "0.8.7", bin: { mppx: "./dist/bin.js" } }),
     /dependency mismatch/
@@ -155,8 +333,11 @@ test("wallet commands use only a named OS keychain and never start a faucet or n
       return `key-${generated}`;
     },
     privateKeyToAccount(key) {
-      const suffix = key === "key-1" ? "1" : "2";
+      const suffix = key === "key-1" ? "1" : key === `0x${"33".repeat(32)}` ? "3" : "2";
       return { address: `0x${suffix.repeat(40)}` };
+    },
+    async storePrivateKey(name, value) {
+      stored.set(name, value);
     },
     async fetch() {
       networkCalls += 1;
@@ -169,22 +350,35 @@ test("wallet commands use only a named OS keychain and never start a faucet or n
     name: "buyer",
     address: `0x${"1".repeat(40)}`,
     keyStorage: "os-keychain",
-    network: "eip155:4217",
-    networkName: "Tempo mainnet",
-    asset: "USDC.e",
-    assetAddress: "0x20C000000000000000000000b9537d11c60E8b50",
-    minimumFundingAmount: "10000",
-    maximumNetworkFee: {
-      amount: "10000",
-      asset: "USDC.e",
-      display: "0.01 USDC.e",
-      separateFromMaxAmount: true
+    rails: {
+      x402: {
+        network: "eip155:8453",
+        networkName: "Base mainnet",
+        asset: "USDC",
+        assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        minimumFundingAmount: "10000",
+        collectionGas: "facilitator-sponsored"
+      },
+      mpp: {
+        network: "eip155:4217",
+        networkName: "Tempo mainnet",
+        asset: "USDC.e",
+        assetAddress: "0x20C000000000000000000000b9537d11c60E8b50",
+        minimumFundingAmount: "10000",
+        maximumNetworkFee: {
+          amount: "10000",
+          asset: "USDC.e",
+          display: "0.01 USDC.e",
+          separateFromMaxAmount: true
+        }
+      }
     },
     nextStep:
       "Before funding, run pact get <pactId>, derive the exact deposit-plus-bond principal, and " +
-      "obtain approval for that cap. Fund this address on Tempo mainnet with that principal plus a " +
-      "transaction-fee reserve. --max-amount caps principal; the separately enforced network-fee " +
-      "ceiling is 0.01 USDC.e. Then run: " +
+      "obtain approval for that cap. For x402, fund this address with USDC on Base mainnet; " +
+      "collection gas is facilitator-sponsored. For MPP, fund it with USDC.e on Tempo mainnet plus a " +
+      "transaction-fee reserve. --max-amount caps principal; MPP separately enforces a " +
+      "0.01 USDC.e network-fee ceiling. Then run: " +
       "pact fund <pactId> --payer mppx --account buyer --max-amount <approved-principal-cap-USD>"
   });
   assert.equal(generated, 1);
@@ -199,18 +393,119 @@ test("wallet commands use only a named OS keychain and never start a faucet or n
     keyStorage: "os-keychain"
   });
   assert.equal(keyReads, keyReadsBeforeList);
+
+  const agentCashKey = `0x${"33".repeat(32)}`;
+  const imported = await runWalletTool("mppx", "import-agentcash", ["--account", "agentcash"], {
+    ...runtime,
+    readAgentCashWallet: () => ({ privateKey: agentCashKey, address: `0x${"3".repeat(40)}` })
+  });
+  assert.equal(imported.address, `0x${"3".repeat(40)}`);
+  assert.equal(imported.importedFrom, "agentcash");
+  assert.equal(imported.sourceAddressVerified, true);
+  assert.doesNotMatch(JSON.stringify(imported), /3333333333333333333333333333333333333333333333333333333333333333/);
+  assert.equal(stored.get("agentcash"), agentCashKey);
+  await assert.rejects(
+    runWalletTool("mppx", "import-agentcash", ["--account", "mismatch"], {
+      ...runtime,
+      readAgentCashWallet: () => ({ privateKey: agentCashKey, address: `0x${"4".repeat(40)}` })
+    }),
+    /public address does not match/
+  );
+
+  const walletDir = mkdtempSync(join(tmpdir(), "agentcash-wallet-test-"));
+  const walletPath = join(walletDir, "wallet.json");
+  writeFileSync(
+    walletPath,
+    JSON.stringify({ privateKey: agentCashKey, address: `0x${"3".repeat(40)}` }),
+    { mode: 0o600 }
+  );
+  assert.equal(readPrivateAgentCashWallet(walletPath).address, `0x${"3".repeat(40)}`);
+  chmodSync(walletPath, 0o644);
+  assert.throws(() => readPrivateAgentCashWallet(walletPath), /mode 0600/);
+
   await assert.rejects(runWalletTool("mppx", "create", ["--account", "buyer"], runtime), /already exists/);
   await assert.rejects(runWalletTool("mppx", "export", ["--account", "buyer"], runtime), /usage: pact wallet/);
   await assert.rejects(runWalletTool("mppx", "create", ["--network", "testnet"], runtime), /usage: pact wallet/);
 });
 
-test("mppx funding is MPP-only and rejects raw environment keys before Pact or wallet access", async () => {
+test("macOS mppx key import is add-only over security stdin and preserves a raced existing key", async () => {
+  const { addMacOsMppxPrivateKey, runWalletTool } = await import("../bin/pact.js");
+  const importedKey = `0x${"33".repeat(32)}`;
+  let invocation;
+  addMacOsMppxPrivateKey("agentcash", importedKey, (executable, args, options) => {
+    invocation = { executable, args, options };
+    return { status: 0 };
+  });
+  assert.equal(invocation.executable, "/usr/bin/security");
+  assert.deepEqual(invocation.args, ["-i"]);
+  assert.equal(invocation.options.shell, false);
+  assert.deepEqual(invocation.options.stdio, ["pipe", "ignore", "ignore"]);
+  assert.equal(invocation.options.env, undefined);
+  assert.match(invocation.options.input, /^add-generic-password -s mppx -a agentcash -w 0x[0-9a-f]{64}\n$/);
+  assert.doesNotMatch(invocation.options.input, /delete-generic-password|-U/);
+  assert.doesNotMatch(JSON.stringify({
+    args: invocation.args,
+    env: invocation.options.env,
+    executable: invocation.executable,
+    shell: invocation.options.shell,
+    stderr: "",
+    stdout: ""
+  }), new RegExp(importedKey.slice(2)));
+  assert.throws(
+    () => addMacOsMppxPrivateKey("agentcash", importedKey, () => ({ status: 1 })),
+    (error) => !error.message.includes(importedKey) && /keychain rejected/.test(error.message)
+  );
+
+  const otherKey = `0x${"44".repeat(32)}`;
+  let stored;
+  const runtime = {
+    createKeychain() {
+      return {
+        async get() { return stored; },
+        async list() { return []; },
+        async set() { throw new Error("unsafe overwrite path must not run"); }
+      };
+    },
+    generatePrivateKey() { return importedKey; },
+    privateKeyToAccount(key) {
+      return { address: key === importedKey ? `0x${"3".repeat(40)}` : `0x${"4".repeat(40)}` };
+    },
+    async readAgentCashWallet() {
+      return { address: `0x${"3".repeat(40)}`, privateKey: importedKey };
+    },
+    async storePrivateKey() {
+      // Simulate another process winning the add-only race with a different key.
+      stored = otherKey;
+    }
+  };
+  await assert.rejects(
+    runWalletTool("mppx", "import-agentcash", ["--account", "agentcash"], runtime),
+    /could not be verified/
+  );
+  assert.equal(stored, otherKey);
+
+  stored = undefined;
+  runtime.storePrivateKey = async (_name, privateKey) => { stored = privateKey; };
+  const imported = await runWalletTool(
+    "mppx",
+    "import-agentcash",
+    ["--account", "agentcash"],
+    runtime
+  );
+  assert.equal(imported.address, `0x${"3".repeat(40)}`);
+  assert.equal(stored, importedKey);
+});
+
+test("mppx funding selects x402 or MPP from the Pact and rejects raw environment keys early", async () => {
   const { paymentProtocol } = await import("../bin/pact.js");
   assert.equal(paymentProtocol("mpp"), "mpp");
-  assert.throws(() => paymentProtocol("x402"), /X-PAYMENT proof/);
-  assert.throws(() => paymentProtocol("mpp", "x402"), /--protocol must be mpp/);
+  assert.equal(paymentProtocol("x402"), "x402");
+  assert.equal(paymentProtocol("x402", "x402"), "x402");
+  assert.throws(() => paymentProtocol("mpp", "x402"), /does not match Pact rail/);
+  assert.throws(() => paymentProtocol("mock"), /not payable by mppx/);
+  assert.throws(() => paymentProtocol("mpp", "other"), /must be mpp or x402/);
 
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   const common = ["fund", "p_1", "--payer", "mppx", "--max-amount", "0.01"];
   const mppxKey = await run(common, {
     PACT_HOME: home,
@@ -247,7 +542,7 @@ test("init --server persists the selected server and PACT_SERVER overrides it", 
     await configured.close();
     await overridden.close();
   });
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   assert.equal((await run(["init", "--server", configured.url], { PACT_HOME: home })).status, 0);
 
   const access = await run(["access"], { PACT_HOME: home, PACT_SERVER: overridden.url });
@@ -257,10 +552,31 @@ test("init --server persists the selected server and PACT_SERVER overrides it", 
   assert.match(overridden.requests[0].url, /^\/access\/ed25519:/);
 });
 
+test("quickstart defaults to production x402 and requires an explicit mock simulation", async () => {
+  const home = secureTempHome();
+  assert.equal((await run(["init"], { PACT_HOME: home })).status, 0);
+
+  const defaultTemplate = await run(["quickstart"], { PACT_HOME: home });
+  assert.equal(defaultTemplate.status, 0, defaultTemplate.stderr);
+  assert.equal(JSON.parse(defaultTemplate.stdout).rail, "x402");
+
+  const mppTemplate = await run(["quickstart", "--rail", "mpp"], { PACT_HOME: home });
+  assert.equal(mppTemplate.status, 0, mppTemplate.stderr);
+  assert.equal(JSON.parse(mppTemplate.stdout).rail, "mpp");
+
+  const mockTemplate = await run(["quickstart", "--rail", "mock"], { PACT_HOME: home });
+  assert.equal(mockTemplate.status, 0, mockTemplate.stderr);
+  assert.equal(JSON.parse(mockTemplate.stdout).rail, "mock");
+
+  const invalid = await run(["quickstart", "--rail", "solana"], { PACT_HOME: home });
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /--rail must be x402, mpp, or mock/);
+});
+
 test("request-access and verify print English guidance matching allowed, pending, and failure states", async (t) => {
   const api = await mockServer();
   t.after(() => api.close());
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   await run(["init", "--server", api.url], { PACT_HOME: home });
 
   const requested = await run(["request-access", "--email", "user@example.com", "--use-case", "agent trading"], { PACT_HOME: home });
@@ -316,7 +632,7 @@ test("secure TTY input never echoes the secret", async () => {
 test("fund accepts proof JSON only on stdin and never reflects rejected argv secrets", async (t) => {
   const api = await mockServer({ denyWrites: true });
   t.after(() => api.close());
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   await run(["init", "--server", api.url], { PACT_HOME: home });
 
   const fromStdin = await run(
@@ -362,7 +678,7 @@ test("fund accepts proof JSON only on stdin and never reflects rejected argv sec
 test("cancel prepares an action-bound signature and submits all signatures from stdin", async (t) => {
   const api = await mockServer();
   t.after(() => api.close());
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   await run(["init", "--server", api.url], { PACT_HOME: home });
   const conf = JSON.parse(readFileSync(join(home, "agent.json"), "utf8"));
   const expiresAt = 2_000_000_000_000;
@@ -413,7 +729,7 @@ test("cancel prepares an action-bound signature and submits all signatures from 
 test("cancel rejects argv signatures and invalid stdin without reflecting input", async (t) => {
   const api = await mockServer();
   t.after(() => api.close());
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   await run(["init", "--server", api.url], { PACT_HOME: home });
 
   for (const argv of [
@@ -450,10 +766,56 @@ test("cancel rejects argv signatures and invalid stdin without reflecting input"
   assert.match(badExpiry.stderr, /usage: pact cancel/);
 });
 
+test("bind-address signs the rail as well as the address", async (t) => {
+  const api = await mockServer();
+  t.after(() => api.close());
+  const home = secureTempHome();
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+
+  const bound = await run(
+    ["bind-address", "--rail", "x402", "--address", "0x1234"],
+    { PACT_HOME: home }
+  );
+  assert.equal(bound.status, 0, bound.stderr);
+  const request = api.requests.find(
+    (entry) => entry.method === "POST" && entry.url === "/rails/x402/address"
+  );
+  assert.ok(request);
+  assert.equal(request.body.action, "rails.bindAddress");
+  assert.deepEqual(request.body.call, { rail: "x402", address: "0x1234" });
+  const { sig, ...unsigned } = request.body;
+  const identity = JSON.parse(readFileSync(join(home, "agent.json"), "utf8"));
+  assert.equal(sig, signCanonical(unsigned, identity.privkey));
+});
+
+test("offers accept sends only the idempotency key in an action-bound signature", async (t) => {
+  const api = await mockServer();
+  t.after(() => api.close());
+  const home = secureTempHome();
+  await run(["init", "--server", api.url], { PACT_HOME: home });
+
+  const accepted = await run(
+    ["offers", "accept", "o_test", "--acceptance-id", "cli-test"],
+    { PACT_HOME: home }
+  );
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const request = api.requests.find(
+    (entry) => entry.method === "POST" && entry.url === "/offers/o_test/accept"
+  );
+  assert.ok(request);
+  assert.equal(request.body.action, "offers.accept");
+  assert.equal(request.body.pactId, "o_test");
+  assert.equal(request.body.stateNonce, 0);
+  assert.deepEqual(request.body.call, { acceptanceId: "cli-test" });
+  const { sig, ...unsigned } = request.body;
+  const identity = JSON.parse(readFileSync(join(home, "agent.json"), "utf8"));
+  assert.equal(sig, signCanonical(unsigned, identity.privkey));
+});
+
 test("every raw non-success write response exits non-zero", async (t) => {
   const api = await mockServer({ denyWrites: true });
   t.after(() => api.close());
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   const deliverable = join(home, "deliverable.txt");
   writeFileSync(deliverable, "test deliverable");
   await run(["init", "--server", api.url], { PACT_HOME: home });
@@ -468,7 +830,8 @@ test("every raw non-success write response exits non-zero", async (t) => {
     ["object", "p_test", "--reason", "missing deliverable"],
     ["poke", "p_test"],
     ["bind-address", "--rail", "x402", "--address", "0x1234"],
-    ["offers", "publish", "--pact", "p_test", "--text", "test offer"]
+    ["offers", "publish", "--pact", "p_test", "--text", "test offer"],
+    ["offers", "accept", "o_test", "--acceptance-id", "deny-test"]
   ];
 
   for (const args of commands) {
@@ -487,7 +850,7 @@ test("every raw non-success write response exits non-zero", async (t) => {
 });
 
 test("help and representative success and failure output are English-only", async () => {
-  const home = mkdtempSync(join(tmpdir(), "pact-cli-test-"));
+  const home = secureTempHome();
   const outputs = [];
   outputs.push(await run(["--help"], { PACT_HOME: home }));
   outputs.push(await run(["whoami"], { PACT_HOME: home }));

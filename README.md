@@ -1,21 +1,22 @@
 # pact-agent — Pact SDK + CLI
 
 Client for [Pact](https://github.com/learners-superpumped/pact-agent) — an escrow protocol for agent-to-agent commerce.
-Your keypair is your identity. Funding is acceptance. Disputes go to a pinned LLM evaluator.
+Your keypair is your identity. Accepting a sale Offer creates its Pact; funding makes it binding.
+Disputes go to a pinned LLM evaluator.
 
 ## Install
 
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.3.1
+npm install --global github:learners-superpumped/pact-agent#v0.3.3
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.3.1
+npm install github:learners-superpumped/pact-agent#v0.3.3
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
@@ -38,17 +39,28 @@ pact verify                         # enter the emailed OTP at the hidden prompt
 # 3. Browse the market
 pact offers search --tags research
 
-# 4. Create a pact (buyer side: grab a template and edit)
-pact quickstart > spec.json && $EDITOR spec.json
-pact create --file spec.json        # → pactId
+# 4. Accept a discovered fixed-price Offer. The CLI signs only an idempotency
+#    key; Pact copies price, bonds, terms, and deadlines from the seller signature.
+pact offers accept o_XXXX --acceptance-id purchase-001  # → pactId
 
-# 5. Deposit = commitment (mock proof is automatic)
-pact fund p_XXXX
-# Real MPP rail: use one named mppx OS-keychain account.
-pact wallet mppx create --account buyer
-# Read the current pact, derive its exact deposit+bond, and obtain approval for that principal cap.
+# 5. x402 real payment: read the exact Pact and production health first.
 pact get p_XXXX
+curl -fsS https://api.pact.sh/health
+# Continue only when the Pact, x402 readiness, and evaluator policy match.
+# Use one funded named mppx OS-keychain account for either real rail.
+pact wallet agentcash accounts
+pact wallet mppx import-agentcash --account buyer
+# Derive the exact deposit+bond and obtain approval for that principal cap.
 pact fund p_XXXX --payer mppx --account buyer --max-amount <approved-principal-cap-USD>
+
+# MPP real-payment alternative: create the spec with --rail mpp, fund the same
+# account address with Tempo mainnet USDC.e plus its disclosed fee reserve, then
+# run the same capped pact fund command.
+# pact quickstart --rail mpp > spec.json
+
+# Local simulation only (never real money):
+# pact quickstart --rail mock > spec.json
+# pact fund p_XXXX                   # mock proof is automatic
 # Legacy recovery only: enter an operator-provided JSON proof at the hidden stdin prompt.
 pact fund p_XXXX --proof-stdin
 
@@ -66,9 +78,9 @@ Do not create a temporary secret file, environment variable, or saved command.
 Seller side:
 
 ```bash
-pact offers publish --template "$(cat template.json)" --tags research --text "market research"
-pact list --mine --state CREATED    # detect instances of my template
-pact fund p_XXXX                    # counter-funding = acceptance
+pact offers publish --template "$(cat offer-template.json)" --inventory 10 --tags research --text "market research"
+pact list --mine --state CREATED    # see buyer-specific Pacts created by accept
+pact fund p_XXXX
 pact put p_XXXX report.pdf          # deliver (bytes at delivery time are preserved)
 pact propose p_XXXX --dist "<myPartyId>:10000" --blob <hash>
 ```
@@ -159,38 +171,72 @@ retrying.
 
 | Pact rail | Network and asset | Challenge → paid retry → receipt |
 |---|---|---|
-| `x402` | Base Sepolia USDC, current Pact compatibility path | 402 requirement → `X-PAYMENT` transaction proof |
+| `x402` | Base mainnet USDC, x402 V2 `exact` through XPay | `PAYMENT-REQUIRED` → `PAYMENT-SIGNATURE` → `PAYMENT-RESPONSE` |
 | `mpp` | Tempo mainnet USDC.e, `tempo/charge` pull | `WWW-Authenticate: Payment` → `Authorization: Payment` → `Payment-Receipt` |
 
-`X-PAYMENT` remains the current Pact x402 compatibility path and is also used
-for the local mock rail. It is not the MPP wire format.
+`X-PAYMENT` is retained only for local mock and operator recovery proofs. It is
+not the production x402 or MPP wire format.
 
 ### Wallet setup
 
-The CLI ships exact, integrity-locked mppx and viem versions in
-`npm-shrinkwrap.json` and resolves the pinned mppx keychain module only from
-this package's own dependency tree. It does not use `npx` to download
-wallet-capable code at runtime.
+The CLI ships exact, integrity-locked AgentCash, PaySponge, mppx, and viem
+versions in `npm-shrinkwrap.json`. It resolves wallet executables only from this
+package's own dependency tree and never uses `npx` to download wallet-capable
+code at runtime. AgentCash and PaySponge keep ownership of their own key stores;
+the Pact wrapper forwards only their documented onboarding, balance, and top-up
+commands.
 
 ```bash
+# AgentCash local wallet onboarding and balances
+pact wallet agentcash onboard
+pact wallet agentcash accounts
+pact wallet agentcash balance
+pact wallet agentcash fund
+
 # Create a local EVM account in the operating-system keychain. This command
 # makes no network request and does not fund the account.
 pact wallet mppx create --account buyer
 pact wallet mppx view --account buyer
 pact wallet mppx list
+
+# Explicitly reuse the same funded AgentCash EVM key for x402 and native MPP.
+# The source must be ~/.agentcash/wallet.json, owned by this user, regular, and mode 0600.
+pact wallet mppx import-agentcash --account pact-agentcash-live
+
+# PaySponge is an optional top-up provider, not the Pact signer. Target the
+# mppx address explicitly; a bare onramp command funds the separate Sponge wallet.
+pact wallet paysponge init
+pact wallet paysponge onramp --chain base --wallet-address <mppx-address> --lock-wallet-address
 ```
 
-`create` returns JSON with `name`, `address`, `keyStorage`, Tempo mainnet
-`network`, USDC.e `asset` and `assetAddress`, `minimumFundingAmount`, the
-separate `maximumNetworkFee`, and the next capped `pact fund` command template.
-Fund the returned address with enough mainnet USDC.e for the Pact requirement
-plus a Tempo transaction-fee reserve.
+`create` returns JSON with `name`, `address`, `keyStorage`, and a `rails` map.
+The x402 entry identifies Base mainnet USDC and facilitator-sponsored collection
+gas. The MPP entry identifies Tempo mainnet USDC.e and its separate maximum
+network fee. Fund the returned address on the Pact's selected network: Base USDC
+for x402, or Tempo USDC.e plus a small transaction-fee reserve for MPP.
 `list` returns account names only; use `view --account <name>` to resolve one
 address. Pact never exports the private key and does not fund the account for
 you.
 
-Only mppx MPP payment is enabled for an integrated `pact fund` real-payment
-flow in this package.
+Named mppx accounts require macOS Keychain, or a Linux Secret Service session
+with `secret-tool` installed. Windows is not currently supported. Complete this
+platform check before creating a production Pact. For PaySponge, use an x402
+Base onramp targeted to the returned mppx address. Do not assume a generic
+PaySponge balance or bare onramp funds the signer. Treat Tempo onramp support as
+unavailable until the provider confirms that exact destination/network; MPP can
+always be topped up through the Tempo address shown by AgentCash accounts or
+another separately approved Tempo USDC.e transfer.
+
+`import-agentcash` is an explicit one-way import into a named OS-keychain
+entry. Before writing it, Pact opens the AgentCash file without following a
+symlink, enforces owner-only `0600` permissions and a small regular-file size,
+derives the EVM address from the private key, and requires it to match the
+stored public address. It prints only the public address and never places the
+key in argv, an environment variable, stdout, or stderr.
+
+The integrated `pact fund --payer mppx` flow pays either production rail. It
+selects `x402` or `mpp` from the immutable Pact document; optional `--protocol`
+can only confirm that selection, not override it.
 
 ```bash
 pact fund p_XXXX \
@@ -199,22 +245,44 @@ pact fund p_XXXX \
   --max-amount <approved-principal-cap-USD>
 ```
 
-The command accepts only an MPP/Tempo pact. For x402, use the operator-provided
-transaction proof through `--proof-stdin`. The mppx path checks the ledger amount
-against `--max-amount` before loading the signer, then verifies the 402
-amount, escrow recipient, network, token, HTTPS route, HTTP method, and
-SHA-256-bound SignedCall before signing. Immediately before signing, it also
-requires a Tempo transaction on chain 4217 whose fee token is USDC.e, rejects
+AgentCash and PaySponge onboarding does not silently spend funds. To use an
+AgentCash key, the user explicitly imports its verified EVM key into a named
+OS-keychain entry and explicitly runs the capped `pact fund` command. The
+payment path checks the ledger amount against `--max-amount` before loading the
+signer, then verifies the 402 amount, escrow recipient, network, token, HTTPS
+route, HTTP method, and SHA-256-bound SignedCall before signing.
+
+Before the unsigned probe, the CLI acquires an exclusive per-Pact funding
+attempt under `$PACT_HOME/payment-attempts`. `PACT_HOME` and that directory must
+be owned by the current user with mode `0700`; hashed journal files use mode
+`0600`. Immediately before a credential-bearing retry can reach the network,
+the CLI fsyncs a `submitted_uncertain` marker containing only a credential hash.
+A validated receipt changes it to `settled`. Both states fail closed on every
+later invocation, including after a process crash. Reconcile the Pact and
+on-chain transaction before manually removing any journal; never remove an
+uncertain journal merely to retry. Pre-credential failures remove their journal
+and remain safe to retry.
+
+For x402, the CLI accepts exactly one Base chain 8453 canonical USDC EIP-3009
+offer with a 60-second lifetime. It verifies the `mppx` route extension, then
+re-decodes and cryptographically verifies the completed `PAYMENT-SIGNATURE`
+immediately before submission. Success requires a matching Base payer and
+transaction hash in `PAYMENT-RESPONSE`. The XPay facilitator submits collection
+gas, so the payer needs USDC but no Base ETH for the deposit.
+
+For MPP, the CLI immediately before signing requires a Tempo transaction on
+chain 4217 whose fee token is USDC.e, rejects
 sponsorship, legacy gas price, blob-fee fields, and injected authorization or
 multisig metadata. It also pins the payer, expiring nonce, challenge expiry,
 exact one-call transfer calldata, and challenge/realm/client attribution memo,
 then caps gas, fee rates, and the computed maximum network fee. MPP accepts only
 the canonical Tempo `0x76` transaction in `tempo/charge` pull mode.
-Production Pact currently requires at least 10,000 atomic units (0.01 USDC.e)
-for MPP funding. `--max-amount` caps the requested payment principal. Network
-fees are separate from that principal cap but have an independent hard ceiling
-of 10,000 atomic USDC.e (0.01 USDC.e), so the maximum authorized wallet debit is
-the selected principal cap plus at most 0.01 USDC.e in network fees.
+Production Pact requires at least 10,000 atomic units ($0.01) on both rails.
+`--max-amount` caps the requested payment principal. x402 collection gas is
+facilitator-sponsored. MPP network fees are separate from that principal cap but
+have an independent hard ceiling of 10,000 atomic USDC.e (0.01 USDC.e), so its
+maximum authorized wallet debit is the selected principal cap plus at most 0.01
+USDC.e in network fees.
 
 The placeholder is not a default. Read the exact current pact first, calculate
 this party's deposit plus bond, and use only the human-approved principal cap.
@@ -222,11 +290,13 @@ this party's deposit plus bond, and use only the human-approved principal cap.
 Pact rejects non-empty `MPPX_PRIVATE_KEY` and `X402_PRIVATE_KEY` variables on
 this path because mppx's resolver otherwise gives an environment key priority.
 Use a named OS-keychain account. `pact wallet mppx` exposes only account create,
-list, and view; it has no generic export, delete, fund, or spend subcommands. The
-only integrated spend path is the Pact-bound, capped `pact fund --payer mppx`
-flow documented above.
+AgentCash import, list, and view; it has no generic export, delete, fund, or
+spend subcommands. The only integrated spend path is the Pact-bound, capped
+`pact fund --payer mppx` flow documented above.
 
-The exact payment package versions are `mppx@0.8.6` and `viem@2.55.1`.
+The exact wallet-capable package versions are `agentcash@0.17.0`,
+`spongewallet@0.1.127`, `@paysponge/sdk@0.1.147`, `mppx@0.8.6`, and
+`viem@2.55.1`.
 
 There is no hosted Pact MPP gateway or MPP API key. The Pact server speaks MPP
 directly with mppx and settles against its Tempo escrow wallet. Check the
