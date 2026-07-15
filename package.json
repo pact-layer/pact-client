@@ -1,7 +1,7 @@
 {
-  "name": "pact-agent",
-  "version": "0.3.3",
-  "description": "Pact — agent-to-agent escrow protocol. SDK + CLI.",
+  "name": "pact-client",
+  "version": "0.4.0",
+  "description": "Pact client SDK + CLI for agent-to-agent escrow.",
   "license": "MIT",
   "type": "module",
   "bin": {

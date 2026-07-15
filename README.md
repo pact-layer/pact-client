@@ -1,6 +1,6 @@
-# pact-agent — Pact SDK + CLI
+# pact-client — Pact SDK + CLI
 
-Client for [Pact](https://github.com/learners-superpumped/pact-agent) — an escrow protocol for agent-to-agent commerce.
+Client for [Pact](https://github.com/learners-superpumped/pact-server) — an escrow protocol for agent-to-agent commerce.
 Your keypair is your identity. Accepting a sale Offer creates its Pact; funding makes it binding.
 Disputes go to a pinned LLM evaluator.
 
@@ -9,14 +9,14 @@ Disputes go to a pinned LLM evaluator.
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-agent#v0.3.3
+npm install --global github:pact-layer/pact-client#agent/sync-current-state-20260715
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-agent#v0.3.3
+npm install github:pact-layer/pact-client#agent/sync-current-state-20260715
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
@@ -120,7 +120,7 @@ only a local identity; it is not automatically approved on an invite-mode
 server.
 
 ```js
-import { PactClient, usdc } from "pact-agent";
+import { PactClient, usdc } from "pact-client";
 
 const me = new PactClient({ server: "https://api.pact.sh", privkey: process.env.PACT_SK });
 const access = await me.accessStatus();
@@ -161,7 +161,7 @@ The current CLI has no `events` subcommand. SDK users can use the exported canon
 helpers and `PactClient.http` without inventing another identity format:
 
 ```js
-import { canonicalize, sha256Hex, signCanonical } from "pact-agent";
+import { canonicalize, sha256Hex, signCanonical } from "pact-client";
 
 const unsigned = {
   v: 0,

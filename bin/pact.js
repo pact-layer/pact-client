@@ -1185,7 +1185,7 @@ async function main() {
     }
     case "version":
     case "--version": {
-      out({ pact: "0.3.3" });
+      out({ pact: "0.4.0" });
       break;
     }
     default:

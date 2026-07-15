@@ -241,10 +241,10 @@ test("pins x402 V2 to Base mainnet USDC, an HTTPS facilitator, and the immutable
 });
 
 test("matches mppx 0.8.6 attribution encoding and binds challenge, realm, and client", () => {
-  assert.equal(MPP_CLIENT_ID, "pact-agent");
+  assert.equal(MPP_CLIENT_ID, "pact-client");
   assert.equal(
     TEST_MEMO,
-    "0xef1ed712010e80be6540a7ab14a5cbd5b377fbf4afb04ccaf08373f214d72734"
+    "0xef1ed712010e80be6540a7ab14a5cb1ddc2218cb68ebc073bc8373f214d72734"
   );
   assert.notEqual(
     mppAttributionMemo({
