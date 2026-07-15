@@ -54,6 +54,56 @@ test("prepareFund creates one action-bound request with an encoded Pact ID", asy
   assert.equal(sig, signCanonical(unsigned, "01".repeat(32)));
 });
 
+test("Wallet methods sign query, deposit, paid retry, and withdrawal calls", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (target, options = {}) => {
+    const request = {
+      url: String(target),
+      body: JSON.parse(String(options.body)),
+      headers: new Headers(options.headers)
+    };
+    requests.push(request);
+    if (request.url.endsWith("/deposit") && requests.filter((item) => item.url.endsWith("/deposit")).length === 1) {
+      return new Response(JSON.stringify({ requirement: { rail: "mpp" } }), {
+        status: 402,
+        headers: { "content-type": "application/json", "www-authenticate": "Payment wallet" }
+      });
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  const client = new PactClient({ server: "https://api.pact.sh", privkey: "01".repeat(32) });
+  await client.wallet({ limit: 10 });
+  await client.depositWallet("mpp", "USDC.e", 10_000, {
+    pay: async (_requirement, request) => {
+      assert.equal(request.url, `https://api.pact.sh/wallets/${encodeURIComponent(client.partyId)}/deposit`);
+      return { headers: { authorization: "Payment wallet-proof" } };
+    }
+  });
+  await client.withdrawWallet("withdrawal-1", "mpp", "USDC.e", 5_000);
+
+  assert.deepEqual(requests.map((request) => request.body.action), [
+    "wallets.read",
+    "wallets.deposit",
+    "wallets.deposit",
+    "wallets.withdraw"
+  ]);
+  assert.equal(requests[2].headers.get("authorization"), "Payment wallet-proof");
+  assert.deepEqual(requests[3].body.call, {
+    withdrawalId: "withdrawal-1",
+    rail: "mpp",
+    asset: "USDC.e",
+    amount: "5000"
+  });
+});
+
 test("fund reuses the exact SignedCall for a standard paid retry and never auto-pays again", async (t) => {
   const originalFetch = globalThis.fetch;
   const posts = [];
