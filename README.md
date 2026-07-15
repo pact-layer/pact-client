@@ -9,14 +9,14 @@ Disputes go to a pinned LLM evaluator.
 Install the CLI globally when you want to run bare `pact` commands:
 
 ```bash
-npm install --global github:learners-superpumped/pact-client#agent/sync-current-state-20260715
+npm install --global github:pact-layer/pact-client#agent/sync-current-state-20260715
 pact --version
 ```
 
 Install the SDK locally in an application:
 
 ```bash
-npm install github:learners-superpumped/pact-client#agent/sync-current-state-20260715
+npm install github:pact-layer/pact-client#agent/sync-current-state-20260715
 ```
 
 A local SDK install exposes the CLI at `node_modules/.bin/pact`; use
