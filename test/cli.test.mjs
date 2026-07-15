@@ -118,11 +118,11 @@ async function mockServer({ denyWrites = false } = {}) {
   };
 }
 
-test("version and init use 0.3.3 and the documented default server", async () => {
+test("version and init use 0.4.0 and the documented default server", async () => {
   const home = secureTempHome();
   const version = await run(["--version"], { PACT_HOME: home });
   assert.equal(version.status, 0);
-  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.3.3" });
+  assert.deepEqual(JSON.parse(version.stdout), { pact: "0.4.0" });
 
   const init = await run(["init"], { PACT_HOME: home });
   assert.equal(init.status, 0);
