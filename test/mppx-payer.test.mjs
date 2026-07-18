@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -352,6 +352,60 @@ test("resolves only an OS-keychain signer and refuses environment private keys",
   delete process.env.MPPX_PRIVATE_KEY;
   process.env.X402_PRIVATE_KEY = PAYER_KEY;
   assert.throws(() => assertMppxKeychainOnly(), /X402_PRIVATE_KEY is disabled/);
+});
+
+test("file keystore stays off without the exact container-operator ack", async (t) => {
+  withCleanKeyEnvironment(t);
+  const previousAck = process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE;
+  const previousDir = process.env.PACT_MPPX_KEYSTORE_DIR;
+  t.after(() => {
+    if (previousAck === undefined) delete process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE;
+    else process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE = previousAck;
+    if (previousDir === undefined) delete process.env.PACT_MPPX_KEYSTORE_DIR;
+    else process.env.PACT_MPPX_KEYSTORE_DIR = previousDir;
+  });
+  delete process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE;
+  const resolver = async () => PAYER;
+  assert.equal(await resolveMppxKeychainAccount("buyer", resolver), PAYER);
+  process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE = "yes";
+  assert.equal(await resolveMppxKeychainAccount("buyer", resolver), PAYER, "wrong ack string must not enable the keystore");
+});
+
+test("file keystore resolves a strict 0600 key file and never re-enables environment keys", async (t) => {
+  withCleanKeyEnvironment(t);
+  const previousAck = process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE;
+  const previousDir = process.env.PACT_MPPX_KEYSTORE_DIR;
+  t.after(() => {
+    if (previousAck === undefined) delete process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE;
+    else process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE = previousAck;
+    if (previousDir === undefined) delete process.env.PACT_MPPX_KEYSTORE_DIR;
+    else process.env.PACT_MPPX_KEYSTORE_DIR = previousDir;
+  });
+  const dir = mkdtempSync(join(tmpdir(), "pact-keystore-"));
+  process.env.PACT_MPPX_ALLOW_FILE_KEYSTORE = "container-operator";
+  process.env.PACT_MPPX_KEYSTORE_DIR = dir;
+  const rejectingResolver = async () => { throw new Error("keychain must not be consulted"); };
+
+  await assert.rejects(resolveMppxKeychainAccount("buyer", rejectingResolver), /account not found/);
+
+  writeFileSync(join(dir, "buyer.key"), `${PAYER_KEY}\n`, { mode: 0o600 });
+  const resolved = await resolveMppxKeychainAccount("buyer", rejectingResolver);
+  assert.equal(resolved.address, PAYER.address);
+
+  chmodSync(join(dir, "buyer.key"), 0o644);
+  await assert.rejects(resolveMppxKeychainAccount("buyer", rejectingResolver), /mode 0600/);
+  chmodSync(join(dir, "buyer.key"), 0o600);
+
+  symlinkSync(join(dir, "buyer.key"), join(dir, "link.key"));
+  await assert.rejects(resolveMppxKeychainAccount("link", rejectingResolver), /regular non-symlink/);
+
+  writeFileSync(join(dir, "junk.key"), "not-a-key", { mode: 0o600 });
+  await assert.rejects(resolveMppxKeychainAccount("junk", rejectingResolver), /32-byte hex/);
+
+  await assert.rejects(resolveMppxKeychainAccount("../buyer", rejectingResolver), /matching/);
+
+  process.env.MPPX_PRIVATE_KEY = PAYER_KEY;
+  await assert.rejects(resolveMppxKeychainAccount("buyer", rejectingResolver), /MPPX_PRIVATE_KEY is disabled/);
 });
 
 test("requires a Pact-bound Tempo Payment-Receipt before reporting success", () => {

@@ -265,7 +265,21 @@ test("wallet-capable dependencies are exact and integrity-locked for the publish
   assert.doesNotMatch(cliSource, /--signatures [<'"]/);
   assert.match(cliSource, /join\(homedir\(\), "\.agentcash", "wallet\.json"\)/);
   assert.doesNotMatch(cliSource, /console\.(?:log|error)\([^\n]*privateKey/);
-  assert.doesNotMatch(payerSource, /readFile|wallet\.json|privateKeyToAccount|AGENTCASH_HOME/);
+  // Raw key material may be touched in exactly one place: the container-operator
+  // file keystore, and only behind its explicit ack gate. Everything else in the
+  // payer keeps the original no-key-file invariant.
+  assert.doesNotMatch(payerSource, /wallet\.json|AGENTCASH_HOME/);
+  const keystoreFn = payerSource.slice(
+    payerSource.indexOf("export async function resolveFileKeystoreAccount"),
+    payerSource.indexOf("export async function resolveMppxKeychainAccount")
+  );
+  const outsideKeystore = payerSource.replace(keystoreFn, "").replace(/^import [^\n]*\n/gm, "");
+  assert.doesNotMatch(outsideKeystore, /readFileSync|privateKeyToAccount/,
+    "key material access must stay confined to resolveFileKeystoreAccount");
+  assert.match(keystoreFn, /readFileSync/);
+  assert.match(keystoreFn, /privateKeyToAccount/);
+  assert.match(keystoreFn, /PACT_MPPX_ALLOW_FILE_KEYSTORE/);
+  assert.match(payerSource, /FILE_KEYSTORE_ACK = "container-operator"/);
 });
 
 test("AgentCash and PaySponge onboarding use only pinned local executables", async () => {

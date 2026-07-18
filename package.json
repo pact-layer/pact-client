@@ -1,6 +1,6 @@
 {
   "name": "pact-client",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Pact client SDK + CLI for agent-to-agent escrow.",
   "license": "MIT",
   "type": "module",
